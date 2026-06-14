@@ -133,6 +133,73 @@ ssh -N \
 也可以在 Web 面板中填写 `user@host` 和 SSH key 路径启动隧道。远程主机
 安装 Codex 或 Claude Code 后，打开面板并复制对应配置即可。
 
+### 远程客户端配置
+
+以下示例假设 SSH 反向隧道使用远程端口 `8789`。如果使用其他端口，请将
+配置中的 `8789` 替换为实际端口。Web 面板中的一键复制内容会自动跟随面板
+当前端口。
+
+#### Claude Code
+
+将以下内容写入远程主机的 `~/.claude/settings.json`：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8789",
+    "ANTHROPIC_AUTH_TOKEN": "dummy",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5-20250929",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5-20251001"
+  },
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "model": "opus"
+}
+```
+
+#### Codex
+
+将以下内容写入远程主机的 `~/.codex/config.toml`：
+
+```toml
+model_provider = "localproxy"
+model = "gpt-5.5"
+disable_response_storage = true
+model_reasoning_effort = "low"
+plan_mode_reasoning_effort = "xhigh"
+model_reasoning_summary = "none"
+model_context_window = 1050000
+model_auto_compact_token_limit = 945000
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+suppress_unstable_features_warning = true
+approvals_reviewer = "user"
+
+[model_providers.localproxy]
+name = "Local Codex Proxy (via SSH tunnel)"
+base_url = "http://127.0.0.1:8789/v1"
+wire_api = "responses"
+env_key = "LOCAL_PROXY_KEY"
+requires_openai_auth = false
+```
+
+启动 Codex 前，在同一个远程 shell 中执行：
+
+```bash
+export LOCAL_PROXY_KEY=dummy
+codex
+```
+
+`LOCAL_PROXY_KEY=dummy` 是 `localproxy` provider 要求的占位凭据。它不是真实
+OpenAI API Key，也不会替代远程主机的 `~/.codex/auth.json`。
+
+上面的 Claude 和 Codex 配置分别启用了 `bypassPermissions` 与
+`danger-full-access`。它们会降低命令执行确认和沙箱限制，只应在可信远程主机
+与可信项目中使用。
+
 远程验证：
 
 ```bash
