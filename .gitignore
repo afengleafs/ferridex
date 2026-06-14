@@ -1,0 +1,34 @@
+# Local deployment notes (intentionally not published)
+/ferridex-ssh-claude-deployment.html
+/ferridex-ssh-codex-deployment.html
+
+# Build outputs
+/ferridex
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Local credentials and runtime state
+/.env
+/.env.*
+/.ferridex/
+/.codex/
+/.claude/
+/auth.json
+/.credentials.json
+*.pem
+*.key
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*~
+
+# Editors and operating systems
+/.idea/
+/.vscode/
+.DS_Store

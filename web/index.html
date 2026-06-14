@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ferridex</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">⛴</span><span>ferridex</span></div>
+    <div class="sub">Codex + Claude 订阅本地代理</div>
+  </header>
+
+  <main>
+    <section class="cards" id="cards"></section>
+
+    <section class="panel">
+      <div class="panel-head">接入</div>
+      <div class="endpoints" id="endpoints"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <span>远程客户端配置</span>
+        <span>复制到 SSH 主机</span>
+      </div>
+      <div class="client-configs">
+        <div class="config-block">
+          <div class="config-head">
+            <div>
+              <strong>Claude Code</strong>
+              <code>~/.claude/settings.json</code>
+            </div>
+            <button class="btn copy-btn" data-copy="claude-config">一键复制</button>
+          </div>
+          <pre><code id="claude-config"></code></pre>
+        </div>
+
+        <div class="config-block">
+          <div class="config-head">
+            <div>
+              <strong>Codex</strong>
+              <code>~/.codex/config.toml</code>
+            </div>
+            <button class="btn copy-btn" data-copy="codex-config">一键复制</button>
+          </div>
+          <pre><code id="codex-config"></code></pre>
+        </div>
+
+        <div class="config-block compact">
+          <div class="config-head">
+            <div>
+              <strong>Codex 启动前执行</strong>
+              <span class="config-note">为 localproxy 提供占位凭据</span>
+            </div>
+            <button class="btn copy-btn" data-copy="codex-env">一键复制</button>
+          </div>
+          <pre><code id="codex-env"></code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <span>SSH 反向隧道</span>
+        <span class="dot" id="tun-dot"></span>
+      </div>
+      <div class="tunnel">
+        <div class="trow">
+          <input id="tun-remote" class="inp" placeholder="user@host（远端）" autocomplete="off" spellcheck="false" />
+          <input id="tun-key" class="inp" placeholder="SSH key（默认 ~/.ssh/id_ed25519）" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="trow">
+          <button id="tun-start" class="btn primary">启动</button>
+          <button id="tun-stop" class="btn">停止</button>
+          <span class="tinfo" id="tun-info">未运行</span>
+        </div>
+        <div class="terr" id="tun-err"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <span>实时日志</span>
+        <span class="livedot" id="livedot" title="日志流"></span>
+      </div>
+      <div class="log-body" id="log"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
