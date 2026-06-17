@@ -165,6 +165,35 @@ main {
   white-space: pre;
 }
 .config-block.compact pre { max-height: none; }
+
+/* collapsible accordions */
+.accordion-head { cursor: pointer; user-select: none; }
+.config-block:not(.open) .accordion-head { border-bottom: none; }
+.config-body { display: none; }
+.config-block.open > .config-body { display: block; }
+.caret {
+  display: inline-block;
+  color: var(--dim);
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+.config-block.open > .accordion-head .caret { transform: rotate(90deg); }
+.config-body .subblock { margin: 14px; }
+
+/* proxy address at top */
+.proxy-url-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.proxy-url-row .name { font-weight: 600; font-size: 13px; color: var(--ink); }
+.proxy-url-row code {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: #f4f4f5;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 10px;
+  color: var(--ink);
+  word-break: break-all;
+}
+.proxy-url-row .copy-btn { margin-left: auto; }
 .copy-btn {
   flex: none;
   padding: 5px 11px;
@@ -173,6 +202,24 @@ main {
 .copy-btn.copied {
   color: var(--ok);
   border-color: var(--ok);
+}
+.lan-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+}
+.lan-info .ep code { word-break: break-all; }
+.lan-note { color: var(--dim); font-size: 12px; line-height: 1.5; }
+.lan-note code {
+  font-family: var(--mono);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 5px;
 }
 
 /* live log */

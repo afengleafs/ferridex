@@ -24,6 +24,9 @@ func main() {
 	fs := flag.NewFlagSet("ferridex", flag.ExitOnError)
 	addr := fs.String("addr", defaultAddr, "监听地址")
 	noOpen := fs.Bool("no-open", false, "serve 时不自动打开浏览器")
+	autoPort := fs.Bool("auto-port", false, "端口被占用时自动尝试后续端口")
+	lan := fs.Bool("lan", false, "绑定 0.0.0.0,向局域网开放 AI 接口(需密钥);面板仍仅限本机")
+	newKey := fs.Bool("new-key", false, "配合 -lan:强制重新生成局域网密钥 lan_key")
 	_ = fs.Parse(args)
 
 	codex := NewCodexProvider()
@@ -31,11 +34,11 @@ func main() {
 
 	switch cmd {
 	case "serve":
-		runServe(*addr, !*noOpen, codex, claude)
+		runServe(*addr, !*noOpen, *lan, *newKey, *autoPort, codex, claude)
 	case "codex":
-		runSingle(*addr, codex)
+		runSingle(*addr, *autoPort, codex)
 	case "claude":
-		runSingle(*addr, claude)
+		runSingle(*addr, *autoPort, claude)
 	case "status":
 		printStatus(codex, claude)
 	case "help", "-h", "--help":
@@ -59,5 +62,9 @@ func usage() {
 选项:
   -addr <地址>   监听地址(默认 127.0.0.1:8788)
   -no-open       serve 时不自动打开浏览器
+  -auto-port     端口被占用时自动尝试后续端口
+  -lan           绑定 0.0.0.0,向同一局域网开放 AI 接口(自动生成密钥);
+                 Web 面板与 SSH 隧道控制仍仅限本机
+  -new-key       配合 -lan:启动时强制重新生成局域网密钥(旧密钥立即失效)
 `)
 }

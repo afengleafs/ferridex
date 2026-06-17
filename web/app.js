@@ -4,17 +4,34 @@ function dot(on) {
   return `<span class="dot ${on ? "on" : "off"}"></span>`;
 }
 
+let netinfo = { lan_enabled: false, lan_ips: [], lan_key: "" };
+
+function currentPort() {
+  return location.port || (location.protocol === "https:" ? "443" : "80");
+}
+
+function proxyHost() {
+  if (netinfo.lan_enabled && netinfo.lan_ips && netinfo.lan_ips.length) {
+    return netinfo.lan_ips[0];
+  }
+  return "127.0.0.1";
+}
+
 function proxyBaseURL() {
-  const port = location.port || (location.protocol === "https:" ? "443" : "80");
-  return `http://127.0.0.1:${port}`;
+  return `http://${proxyHost()}:${currentPort()}`;
+}
+
+function authToken() {
+  return netinfo.lan_key || "dummy";
 }
 
 function loadClientConfigs() {
   const baseURL = proxyBaseURL();
+  const token = authToken();
   const claude = {
     env: {
       ANTHROPIC_BASE_URL: baseURL,
-      ANTHROPIC_AUTH_TOKEN: "dummy",
+      ANTHROPIC_AUTH_TOKEN: token,
       ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-4-8",
       ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-4-5-20250929",
       ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-4-5-20251001",
@@ -39,15 +56,44 @@ suppress_unstable_features_warning = true
 approvals_reviewer = "user"
 
 [model_providers.localproxy]
-name = "Local Codex Proxy (via SSH tunnel)"
+name = "Local Codex Proxy"
 base_url = "${baseURL}/v1"
 wire_api = "responses"
 env_key = "LOCAL_PROXY_KEY"
 requires_openai_auth = false`;
 
+  $("#proxy-url").textContent = baseURL;
   $("#claude-config").textContent = JSON.stringify(claude, null, 2);
   $("#codex-config").textContent = codex;
-  $("#codex-env").textContent = "export LOCAL_PROXY_KEY=dummy";
+  $("#codex-env").textContent = `export LOCAL_PROXY_KEY=${token}`;
+}
+
+async function loadNetinfo() {
+  try {
+    const r = await fetch("/api/netinfo");
+    netinfo = await r.json();
+  } catch {}
+  loadClientConfigs();
+  renderLanInfo();
+}
+
+function renderLanInfo() {
+  const el = $("#lan-info");
+  if (!el) return;
+  if (netinfo.lan_enabled) {
+    const port = currentPort();
+    const ips = netinfo.lan_ips || [];
+    const urls = ips.length
+      ? ips.map((ip) => `http://${ip}:${port}`).join("　")
+      : "未检测到局域网 IPv4 地址";
+    el.innerHTML =
+      `<div class="ep"><span class="name">局域网</span><code>${urls}</code></div>` +
+      `<div class="ep"><span class="name">密钥</span><code>${netinfo.lan_key}</code></div>` +
+      `<div class="lan-note">同一 Wi-Fi 下的另一台电脑使用上面地址；下方配置已包含密钥，可直接复制粘贴。若对方连不上，多半是公司 Wi-Fi 的客户端隔离，请改用 SSH 反向隧道。</div>`;
+  } else {
+    el.innerHTML =
+      `<div class="lan-note">本机模式：仅 127.0.0.1 可用。要让同一 Wi-Fi 的另一台电脑直连，请用 <code>ferridex serve -lan</code> 启动。</div>`;
+  }
 }
 
 async function copyText(text) {
@@ -69,7 +115,8 @@ async function copyText(text) {
 
 function startCopyButtons() {
   document.querySelectorAll(".copy-btn").forEach((button) => {
-    button.addEventListener("click", async () => {
+    button.addEventListener("click", async (e) => {
+      e.stopPropagation();
       const target = document.getElementById(button.dataset.copy);
       const original = button.textContent;
       try {
@@ -83,6 +130,14 @@ function startCopyButtons() {
         button.textContent = original;
         button.classList.remove("copied");
       }, 1600);
+    });
+  });
+}
+
+function startAccordions() {
+  document.querySelectorAll(".accordion-head").forEach((head) => {
+    head.addEventListener("click", () => {
+      head.closest(".config-block").classList.toggle("open");
     });
   });
 }
@@ -114,7 +169,6 @@ async function loadStatus() {
         .join("") || `<div class="empty">无 provider</div>`;
 
     $("#endpoints").innerHTML =
-      `<div class="ep"><span class="name">base</span><code>${location.origin}</code></div>` +
       providers
         .map(
           (p) =>
@@ -170,7 +224,7 @@ async function loadTunnel() {
     $("#tun-start").disabled = !!st.running;
     $("#tun-stop").disabled = !st.running;
     $("#tun-info").textContent = st.running
-      ? `运行中 · pid ${st.pid} · ${st.uptime_sec}s`
+      ? `运行中 · pid ${st.pid} · ${st.uptime_sec}s · 远端端口 ${st.remote_port}（远端客户端连 127.0.0.1:${st.remote_port}）`
       : "未运行";
     $("#tun-err").textContent = st.last_error || "";
   } catch (e) {}
@@ -199,8 +253,9 @@ $("#tun-stop").addEventListener("click", () => tunnelAction("/api/tunnel/stop", 
 
 $("#log").innerHTML =
   `<div class="empty">等待请求…(对 /v1/responses 或 /v1/messages 发一次请求即可看到)</div>`;
-loadClientConfigs();
+loadNetinfo();
 startCopyButtons();
+startAccordions();
 loadStatus();
 loadTunnel();
 setInterval(() => {

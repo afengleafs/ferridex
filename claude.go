@@ -21,11 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +42,8 @@ const (
 	claudeSystemID    = "You are Claude Code, Anthropic's official CLI for Claude."
 	claudeRefreshSkew = 60 * time.Second
 	claudeKeychainSvc = "Claude Code-credentials"
+
+	claudeTransientRateLimitCooldown = 5 * time.Second
 )
 
 // claudeMimicHeaders is the rest of the official Claude Code CLI request fingerprint.
@@ -101,8 +105,12 @@ func mergeBetas(clientHeader string) string {
 }
 
 type ClaudeProvider struct {
-	client *http.Client
-	mu     sync.Mutex
+	client      *http.Client
+	accessToken func(context.Context) (string, error)
+	now         func() time.Time
+	mu          sync.Mutex
+	limitMu     sync.Mutex
+	limit       *claudeRateLimitState
 
 	// stable per-process identifiers for metadata.user_id
 	uhash string // 64 hex
@@ -113,6 +121,7 @@ type ClaudeProvider struct {
 func NewClaudeProvider() *ClaudeProvider {
 	return &ClaudeProvider{
 		client: &http.Client{Timeout: 10 * time.Minute},
+		now:    time.Now,
 		uhash:  randHex(32),
 		acct:   randUUID(),
 		sid:    randUUID(),
@@ -134,31 +143,40 @@ func (c *ClaudeProvider) Status() ProviderStatus {
 	if w, ok := loadClaudeCache(); ok && w.AccessToken != "" {
 		st.LoggedIn = true
 		st.Detail = "Claude 订阅(令牌已缓存)"
-		return st
-	}
-	if home, err := os.UserHomeDir(); err == nil {
+	} else if home, err := os.UserHomeDir(); err == nil {
 		if _, err := os.Stat(filepath.Join(home, ".claude", ".credentials.json")); err == nil {
 			st.LoggedIn = true
 			st.Detail = "Claude 订阅(凭证文件)"
-			return st
 		}
 	}
-	st.Detail = "凭证可能在 Keychain;发一次 /v1/messages 即激活并缓存"
+	if st.Detail == "" {
+		st.Detail = "凭证可能在 Keychain;发一次 /v1/messages 即激活并缓存"
+	}
+	if limit, ok := c.activeRateLimit(); ok {
+		st.Detail += fmt.Sprintf("; %s，恢复时间 %s", limit.label, limit.until.Local().Format("2006-01-02 15:04:05 MST"))
+	}
 	return st
 }
 
 func (c *ClaudeProvider) Relay(w http.ResponseWriter, r *http.Request) {
+	if r.Body != nil {
+		defer r.Body.Close()
+	}
+	if limit, ok := c.activeRateLimit(); ok {
+		writeClaudeRateLimitResponse(w, limit, c.nowTime())
+		return
+	}
+
 	rawBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
 
 	patched := c.patchClaudeBody(rawBody)
 	wantStream := requestWantsStream(rawBody)
 
-	token, err := c.token(r.Context())
+	token, err := c.getAccessToken(r.Context())
 	if err != nil {
 		http.Error(w, "claude auth: "+err.Error(), http.StatusUnauthorized)
 		return
@@ -185,13 +203,221 @@ func (c *ClaudeProvider) Relay(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upstreamResp.Body.Close()
 
+	if upstreamResp.StatusCode == http.StatusTooManyRequests {
+		body, _ := io.ReadAll(upstreamResp.Body)
+		limit := newClaudeRateLimitState(upstreamResp.Header, body, c.nowTime())
+		c.setRateLimit(limit)
+		log.Printf("Claude 429 分类: %s; 恢复时间 %s; 禁止 Claude Code 重试=%t",
+			limit.label, limit.until.Local().Format("2006-01-02 15:04:05 MST"), limit.stopRetries)
+		writeClaudeRateLimitResponse(w, limit, c.nowTime())
+		return
+	}
+
 	// Anthropic native protocol on both ends — transparent passthrough.
-	w.Header().Set("Content-Type", firstNonEmpty(upstreamResp.Header.Get("Content-Type"), "application/json"))
+	writeClaudeResponseHeaders(w.Header(), upstreamResp.Header)
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
 	w.WriteHeader(upstreamResp.StatusCode)
 	if wantStream {
 		streamCopy(w, upstreamResp.Body)
 	} else {
 		_, _ = io.Copy(w, upstreamResp.Body)
+	}
+}
+
+type claudeRateLimitState struct {
+	until       time.Time
+	body        []byte
+	header      http.Header
+	label       string
+	stopRetries bool
+}
+
+func (c *ClaudeProvider) nowTime() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+func (c *ClaudeProvider) getAccessToken(ctx context.Context) (string, error) {
+	if c.accessToken != nil {
+		return c.accessToken(ctx)
+	}
+	return c.token(ctx)
+}
+
+func (c *ClaudeProvider) activeRateLimit() (*claudeRateLimitState, bool) {
+	c.limitMu.Lock()
+	defer c.limitMu.Unlock()
+
+	if c.limit == nil {
+		return nil, false
+	}
+	if !c.nowTime().Before(c.limit.until) {
+		c.limit = nil
+		return nil, false
+	}
+	return cloneClaudeRateLimitState(c.limit), true
+}
+
+func (c *ClaudeProvider) setRateLimit(limit *claudeRateLimitState) {
+	c.limitMu.Lock()
+	defer c.limitMu.Unlock()
+
+	if c.limit != nil && c.nowTime().Before(c.limit.until) && c.limit.stopRetries {
+		if !limit.stopRetries || !limit.until.After(c.limit.until) {
+			return
+		}
+	}
+	c.limit = cloneClaudeRateLimitState(limit)
+}
+
+func cloneClaudeRateLimitState(limit *claudeRateLimitState) *claudeRateLimitState {
+	if limit == nil {
+		return nil
+	}
+	out := *limit
+	out.body = append([]byte(nil), limit.body...)
+	out.header = limit.header.Clone()
+	return &out
+}
+
+func newClaudeRateLimitState(header http.Header, body []byte, now time.Time) *claudeRateLimitState {
+	until, scope, exhausted := claudeQuotaReset(header, now)
+	if !exhausted {
+		until = now.Add(claudeTransientRateLimitCooldown)
+		scope = "Claude 临时限流"
+	}
+	return &claudeRateLimitState{
+		until:       until,
+		body:        append([]byte(nil), body...),
+		header:      filteredClaudeResponseHeaders(header),
+		label:       scope,
+		stopRetries: exhausted,
+	}
+}
+
+func claudeQuotaReset(header http.Header, now time.Time) (time.Time, string, bool) {
+	type window struct {
+		name  string
+		reset time.Time
+	}
+	var available []window
+	var exhausted []window
+	for _, name := range []string{"5h", "7d"} {
+		prefix := "anthropic-ratelimit-unified-" + name + "-"
+		reset, ok := parseClaudeResetTime(header.Get(prefix + "reset"))
+		if !ok || !reset.After(now) {
+			continue
+		}
+		candidate := window{name: name, reset: reset}
+		available = append(available, candidate)
+		if claudeWindowExceeded(header, prefix) {
+			exhausted = append(exhausted, candidate)
+		}
+	}
+
+	if len(exhausted) > 0 {
+		chosen := exhausted[0]
+		for _, candidate := range exhausted[1:] {
+			if candidate.reset.After(chosen.reset) {
+				chosen = candidate
+			}
+		}
+		return chosen.reset, claudeQuotaLabel(chosen.name), true
+	}
+
+	// Anthropic sometimes returns window reset headers without a reliable
+	// utilization/threshold signal. On a 429, sub2api treats the sooner official
+	// window reset as the best available quota signal.
+	if len(available) > 0 {
+		chosen := available[0]
+		for _, candidate := range available[1:] {
+			if candidate.reset.Before(chosen.reset) {
+				chosen = candidate
+			}
+		}
+		return chosen.reset, claudeQuotaLabel(chosen.name), true
+	}
+
+	if reset, ok := parseClaudeResetTime(header.Get("anthropic-ratelimit-unified-reset")); ok && reset.After(now) {
+		return reset, "Claude 限额已耗尽", true
+	}
+	return time.Time{}, "", false
+}
+
+func claudeQuotaLabel(window string) string {
+	if window == "7d" {
+		return "Claude 7 天限额已耗尽"
+	}
+	return "Claude 5 小时限额已耗尽"
+}
+
+func claudeWindowExceeded(header http.Header, prefix string) bool {
+	if strings.EqualFold(strings.TrimSpace(header.Get(prefix+"surpassed-threshold")), "true") {
+		return true
+	}
+	utilization := strings.TrimSpace(header.Get(prefix + "utilization"))
+	if utilization == "" {
+		return false
+	}
+	value, err := strconv.ParseFloat(utilization, 64)
+	if err != nil {
+		return false
+	}
+	return value >= 1.0-1e-9
+}
+
+func parseClaudeResetTime(raw string) (time.Time, bool) {
+	timestamp, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || timestamp <= 0 {
+		return time.Time{}, false
+	}
+	if timestamp > 1e11 {
+		timestamp /= 1000
+	}
+	return time.Unix(timestamp, 0), true
+}
+
+func writeClaudeRateLimitResponse(w http.ResponseWriter, limit *claudeRateLimitState, now time.Time) {
+	writeClaudeResponseHeaders(w.Header(), limit.header)
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	if limit.stopRetries {
+		w.Header().Set("X-Should-Retry", "false")
+		remaining := limit.until.Sub(now)
+		seconds := int64((remaining + time.Second - 1) / time.Second)
+		if seconds < 1 {
+			seconds = 1
+		}
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
+	}
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = w.Write(limit.body)
+}
+
+func filteredClaudeResponseHeaders(src http.Header) http.Header {
+	dst := make(http.Header)
+	writeClaudeResponseHeaders(dst, src)
+	return dst
+}
+
+func writeClaudeResponseHeaders(dst, src http.Header) {
+	for key, values := range src {
+		lower := strings.ToLower(key)
+		if lower != "content-type" &&
+			lower != "retry-after" &&
+			lower != "request-id" &&
+			lower != "x-request-id" &&
+			!strings.HasPrefix(lower, "anthropic-ratelimit-") {
+			continue
+		}
+		for _, value := range values {
+			dst.Add(key, value)
+		}
 	}
 }
 

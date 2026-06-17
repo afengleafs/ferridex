@@ -63,6 +63,9 @@ mkdir -p ~/.local/bin
 go build -o ~/.local/bin/ferridex .
 ```
 
+源码更新后需要重新执行上述构建命令，并重启正在运行的 ferridex 进程；仅执行
+`go build ./...` 不会替换 `PATH` 中的 `~/.local/bin/ferridex`。
+
 确保 `~/.local/bin` 位于 `PATH` 中：
 
 ```bash
@@ -81,6 +84,12 @@ ferridex serve -addr 127.0.0.1:8789
 # 启动统一网关，但不自动打开浏览器
 ferridex serve -no-open
 
+# 默认端口被占用时自动尝试后续端口
+ferridex serve -auto-port
+
+# 向同一局域网开放 AI 接口（详见「局域网直连」）
+ferridex serve -lan
+
 # 只启动一个代理，不提供 Web 面板
 ferridex codex
 ferridex claude
@@ -89,8 +98,11 @@ ferridex claude
 ferridex status
 ```
 
-默认监听地址为 `127.0.0.1:8788`。不要将监听地址改为 `0.0.0.0`，除非已经
-理解凭据代理被其他主机访问的风险并配置了下游鉴权。
+默认监听地址为 `127.0.0.1:8788`。如果端口被 VS Code、旧隧道或其他进程占用，
+可以用 `ferridex serve -auto-port` 自动尝试后续端口；启动日志和 Web 面板复制的
+配置会显示实际端口。要让同一局域网的另一台电脑直连，请使用 `ferridex serve -lan`
+（见下文「局域网直连」），它只把 AI 接口开放到局域网并要求密钥。不要手动把监听
+地址改为 `0.0.0.0`，那样会把 Web 面板和 SSH 隧道控制接口一起暴露给其他主机。
 
 ## Web 面板
 
@@ -110,7 +122,64 @@ http://127.0.0.1:8788/
 - SSH 反向隧道管理；
 - `/v1/responses` 和 `/v1/messages` 请求日志。
 
-复制出的配置会自动跟随面板当前端口。
+复制出的配置会自动跟随面板当前端口，包括 `-auto-port` 自动切换后的端口。
+
+## 局域网直连（同一 Wi-Fi）
+
+如果两台电脑接在同一个局域网（例如公司 Wi-Fi），可以让另一台电脑直接通过
+局域网调用本机的 ferridex，无需 SSH 隧道。
+
+在已登录的电脑（A）上启动：
+
+```bash
+ferridex serve -lan
+```
+
+`-lan` 会：
+
+- 把监听地址绑定到 `0.0.0.0:8788`，并在启动日志中打印可用的局域网地址
+  （形如 `http://192.168.x.x:8788`）。如果同时使用 `-auto-port`，端口被占用时会
+  自动切换到后续可用端口。
+- 自动生成一个访问密钥并写入 `~/.ferridex/config.json` 的 `lan_key`
+  （重启保持不变）。如果你已设置 `downstream_key`，则沿用它。
+- **只把 AI 接口开放到局域网**：`/v1/responses`、`/v1/messages`、`/healthz`。
+  Web 面板和 SSH 隧道控制接口仍然仅限本机（loopback），局域网访问会返回
+  `403`。
+- 局域网请求必须携带密钥；A 本机 `127.0.0.1` 的本地使用仍然免密钥。
+
+在 A 上打开面板 `http://127.0.0.1:8788/`，「远程客户端配置」面板会显示局域网
+地址和密钥，并把密钥写入一键复制的 Claude / Codex 配置。把对应配置复制到另一
+台电脑（B）即可：
+
+- Claude Code：写入 B 的 `~/.claude/settings.json`（`ANTHROPIC_BASE_URL` 指向
+  `http://192.168.x.x:8788`，`ANTHROPIC_AUTH_TOKEN` 为密钥）。
+- Codex：写入 B 的 `~/.codex/config.toml`（`base_url` 指向
+  `http://192.168.x.x:8788/v1`），并在启动前执行
+  `export LOCAL_PROXY_KEY=<密钥>` 后运行 `codex`。
+
+在 B 上先验证连通性：
+
+```bash
+curl -sS http://192.168.x.x:8788/healthz
+```
+
+### 轮换密钥
+
+`lan_key` 默认重启保持不变。要更换密钥（例如泄露后），用 `-new-key` 启动：
+
+```bash
+ferridex serve -lan -new-key
+```
+
+它会强制重新生成 `lan_key`，**旧密钥立即失效**——另一台电脑需要用面板里的新配置
+重连。（如果你设置了 `downstream_key`，它优先生效，`-new-key` 对 `lan_key` 无影响。）
+
+注意事项：
+
+- 很多公司 Wi-Fi 开启了「客户端隔离 / AP isolation」，会禁止设备之间互通。
+  此时局域网直连不可用（连 `/healthz` 都不通），请改用下文的 **SSH 反向隧道**。
+- 首次绑定到 `0.0.0.0` 时，macOS 可能弹窗询问是否允许传入网络连接，需放行。
+- 这仍然是一个凭据代理，只应在可信局域网中开启 `-lan`。
 
 ## SSH 远程使用
 
@@ -132,6 +201,21 @@ ssh -N \
 
 也可以在 Web 面板中填写 `user@host` 和 SSH key 路径启动隧道。远程主机
 安装 Codex 或 Claude Code 后，打开面板并复制对应配置即可。
+
+通过面板启动隧道时，如果远端的转发端口被占用（报
+`remote port forwarding failed for listen port ...`），ferridex 会**自动改用
+下一个远端端口重试**（最多顺延 20 个），并在隧道状态里显示最终选用的「远端端口」。
+注意这是隧道的远端转发端口，和本机 `-auto-port` 选择的本地监听端口是两套独立端口：
+`-auto-port` 只解决本机端口冲突，解决不了远端的转发端口冲突。
+
+如果连续顺延仍然失败，多半是旧 SSH 隧道或远端已有 ferridex 进程长期占着这些端口。
+到远端执行（把 8788 换成报错里的端口）：
+
+```bash
+lsof -nP -iTCP:8788 -sTCP:LISTEN
+```
+
+停止占用进程后重试；或换一台远端主机。远端配置中的端口请以面板显示的「远端端口」为准。
 
 ### 远程客户端配置
 
@@ -258,7 +342,19 @@ go vet ./...
 go build ./...
 ```
 
-项目当前没有自动化测试用例；`go test ./...` 主要执行编译检查。
+`go test ./...` 包含 Claude 限额识别、熔断缓存和响应头透传的自动化测试。
+
+## Claude 限额熔断
+
+Claude 上游返回 `429` 时，ferridex 会区分订阅额度耗尽与瞬态限流：
+
+- 检测到 Anthropic 官方 5 小时或 7 天窗口耗尽信号后，ferridex 会在内存中熔断到官方
+  reset 时间。熔断期间不会继续请求上游，并向 Claude Code 返回原始错误体、
+  `Retry-After` 和 `X-Should-Retry: false`。
+- 没有明确额度耗尽信号的 `429` 仅负缓存 5 秒，减少短时间重复请求，同时保留客户端的
+  正常退避行为。
+
+熔断状态仅在当前 ferridex 进程内保存。重启 ferridex 会清除状态并重新探测上游。
 
 ## 已知限制
 

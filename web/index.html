@@ -13,52 +13,62 @@
   </header>
 
   <main>
-    <section class="cards" id="cards"></section>
-
-    <section class="panel">
-      <div class="panel-head">接入</div>
-      <div class="endpoints" id="endpoints"></div>
-    </section>
-
     <section class="panel">
       <div class="panel-head">
         <span>远程客户端配置</span>
-        <span>复制到 SSH 主机</span>
+        <span>复制到局域网 / SSH 主机</span>
       </div>
       <div class="client-configs">
+        <div class="proxy-url-row">
+          <span class="name">代理地址</span>
+          <code id="proxy-url"></code>
+          <button class="btn copy-btn" data-copy="proxy-url">复制</button>
+        </div>
+        <div class="lan-info" id="lan-info"></div>
+
         <div class="config-block">
-          <div class="config-head">
+          <div class="config-head accordion-head">
             <div>
+              <span class="caret">▸</span>
               <strong>Claude Code</strong>
               <code>~/.claude/settings.json</code>
             </div>
             <button class="btn copy-btn" data-copy="claude-config">一键复制</button>
           </div>
-          <pre><code id="claude-config"></code></pre>
+          <div class="config-body"><pre><code id="claude-config"></code></pre></div>
         </div>
 
         <div class="config-block">
-          <div class="config-head">
+          <div class="config-head accordion-head">
             <div>
+              <span class="caret">▸</span>
               <strong>Codex</strong>
               <code>~/.codex/config.toml</code>
             </div>
             <button class="btn copy-btn" data-copy="codex-config">一键复制</button>
           </div>
-          <pre><code id="codex-config"></code></pre>
-        </div>
-
-        <div class="config-block compact">
-          <div class="config-head">
-            <div>
-              <strong>Codex 启动前执行</strong>
-              <span class="config-note">为 localproxy 提供占位凭据</span>
+          <div class="config-body">
+            <pre><code id="codex-config"></code></pre>
+            <div class="config-block compact subblock">
+              <div class="config-head">
+                <div>
+                  <strong>启动前执行</strong>
+                  <span class="config-note">为 localproxy 提供占位凭据</span>
+                </div>
+                <button class="btn copy-btn" data-copy="codex-env">一键复制</button>
+              </div>
+              <pre><code id="codex-env"></code></pre>
             </div>
-            <button class="btn copy-btn" data-copy="codex-env">一键复制</button>
           </div>
-          <pre><code id="codex-env"></code></pre>
         </div>
       </div>
+    </section>
+
+    <section class="cards" id="cards"></section>
+
+    <section class="panel">
+      <div class="panel-head">接入</div>
+      <div class="endpoints" id="endpoints"></div>
     </section>
 
     <section class="panel">
