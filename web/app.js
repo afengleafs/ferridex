@@ -1,26 +1,105 @@
 const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
 
-function dot(on) {
-  return `<span class="dot ${on ? "on" : "off"}"></span>`;
+/* ===== 主题切换 ===== */
+function initTheme() {
+  const root = document.documentElement;
+  const btn = $("#theme-toggle");
+  const sync = () => {
+    const dark = root.getAttribute("data-theme") === "dark";
+    btn.setAttribute("aria-pressed", String(dark));
+  };
+  sync();
+  btn.addEventListener("click", () => {
+    const dark = root.getAttribute("data-theme") !== "dark";
+    root.setAttribute("data-theme", dark ? "dark" : "light");
+    try { localStorage.setItem("theme", dark ? "dark" : "light"); } catch (e) {}
+    sync();
+  });
 }
 
+/* ===== 全局 toast ===== */
+function toast(msg, kind) {
+  const wrap = $("#toast");
+  if (!wrap) return;
+  const el = document.createElement("div");
+  el.className = "toast-item" + (kind === "err" ? " err" : "");
+  el.textContent = msg;
+  wrap.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("show"));
+  setTimeout(() => {
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 220);
+  }, 1800);
+}
+
+/* ===== 剪贴板 ===== */
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("copy failed");
+}
+
+/* ===== 复制按钮(按钮文案 + toast 双反馈) ===== */
+function startCopyButtons() {
+  $$(".copy-btn").forEach((button) => {
+    button.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const target = document.getElementById(button.dataset.copy);
+      if (!target) return;
+      const original = button.textContent;
+      try {
+        await copyText(target.textContent);
+        button.textContent = "已复制";
+        button.classList.add("copied");
+        toast("已复制到剪贴板");
+      } catch {
+        button.textContent = "复制失败";
+        toast("复制失败", "err");
+      }
+      setTimeout(() => {
+        button.textContent = original;
+        button.classList.remove("copied");
+      }, 1600);
+    });
+  });
+}
+
+/* ===== 折叠(默认展开,仍可收起) ===== */
+function startAccordions() {
+  $$(".accordion-head").forEach((head) => {
+    head.addEventListener("click", () => {
+      head.closest(".config-block").classList.toggle("open");
+    });
+  });
+}
+
+/* ===== netinfo / 远程客户端配置 ===== */
 let netinfo = { lan_enabled: false, lan_ips: [], lan_key: "" };
 
 function currentPort() {
   return location.port || (location.protocol === "https:" ? "443" : "80");
 }
-
 function proxyHost() {
   if (netinfo.lan_enabled && netinfo.lan_ips && netinfo.lan_ips.length) {
     return netinfo.lan_ips[0];
   }
   return "127.0.0.1";
 }
-
 function proxyBaseURL() {
   return `http://${proxyHost()}:${currentPort()}`;
 }
-
 function authToken() {
   return netinfo.lan_key || "dummy";
 }
@@ -36,9 +115,7 @@ function loadClientConfigs() {
       ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-4-5-20250929",
       ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-4-5-20251001",
     },
-    permissions: {
-      defaultMode: "bypassPermissions",
-    },
+    permissions: { defaultMode: "bypassPermissions" },
     skipDangerousModePermissionPrompt: true,
     model: "opus",
   };
@@ -96,119 +173,269 @@ function renderLanInfo() {
   }
 }
 
-async function copyText(text) {
-  if (navigator.clipboard && window.isSecureContext) {
-    await navigator.clipboard.writeText(text);
-    return;
+/* ===== 状态卡片 + 整体健康条 ===== */
+function dot(on) {
+  return `<span class="dot ${on ? "on" : "off"}"></span>`;
+}
+
+// 从 Claude detail 里提取「恢复时间 HH:MM:SS」并返回绝对时间戳(ms);无法解析返回 null。
+function parseClaudeReset(detail) {
+  if (!detail) return null;
+  const m = detail.match(/(\d{1,2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const now = new Date();
+  const reset = new Date(now);
+  reset.setHours(+m[1], +m[2], +m[3], 0);
+  if (reset.getTime() <= now.getTime()) {
+    // 跨天:恢复时间已过但 detail 尚未刷新,加 24h 显示为「即将到期」。
+    reset.setDate(reset.getDate() + 1);
   }
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  const copied = document.execCommand("copy");
-  textarea.remove();
-  if (!copied) throw new Error("copy failed");
+  return reset.getTime();
 }
 
-function startCopyButtons() {
-  document.querySelectorAll(".copy-btn").forEach((button) => {
-    button.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const target = document.getElementById(button.dataset.copy);
-      const original = button.textContent;
-      try {
-        await copyText(target.textContent);
-        button.textContent = "已复制";
-        button.classList.add("copied");
-      } catch {
-        button.textContent = "复制失败";
-      }
-      setTimeout(() => {
-        button.textContent = original;
-        button.classList.remove("copied");
-      }, 1600);
-    });
+// 每个卡片的 detail 可能有倒计时,这里记录 {cardId, resetMs} 供每秒刷新。
+let countdowns = [];
+let countdownTimer = null;
+
+function fmtCountdown(ms) {
+  if (ms <= 0) return null;
+  const s = Math.round(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `约 ${h} 时 ${m} 分后恢复`;
+  if (m > 0) return `约 ${m} 分 ${sec} 秒后恢复`;
+  return `约 ${sec} 秒后恢复`;
+}
+
+function tickCountdown() {
+  const now = Date.now();
+  countdowns.forEach((c) => {
+    const el = document.getElementById(c.id);
+    if (!el) return;
+    const span = el.querySelector(".health-countdown");
+    const txt = fmtCountdown(c.resetMs - now);
+    if (span) {
+      if (txt) span.textContent = " · " + txt;
+      else span.textContent = "";
+    }
   });
 }
 
-function startAccordions() {
-  document.querySelectorAll(".accordion-head").forEach((head) => {
-    head.addEventListener("click", () => {
-      head.closest(".config-block").classList.toggle("open");
-    });
-  });
+function setHealth(state, text, countdownMs) {
+  const bar = $("#healthbar");
+  bar.classList.remove("ok", "warn", "bad");
+  if (state) bar.classList.add(state);
+  $("#health-dot").className = "dot";
+  if (state === "ok") $("#health-dot").classList.add("on");
+  else if (state === "bad") $("#health-dot").classList.add("off");
+  let extra = "";
+  if (countdownMs) {
+    extra = ` <span class="health-countdown"> · ${fmtCountdown(countdownMs - Date.now()) || ""}</span>`;
+  }
+  $("#health-text").innerHTML = text + extra;
 }
+
+let lastProvidersOK = false;
+let lastDetail = {};
 
 async function loadStatus() {
   try {
     const r = await fetch("/api/status");
     const d = await r.json();
     const providers = d.providers || [];
+    lastProvidersOK = true;
+
+    countdowns = [];
+    let claudeResetMs = null;
 
     $("#cards").innerHTML =
       providers
-        .map(
-          (p) => `
-      <div class="card">
-        <h3>${p.title || p.name}</h3>
-        <div class="who">${p.name}</div>
-        <div class="statusline">
-          ${dot(p.logged_in)}
-          <strong>${p.logged_in ? "已登录" : "未登录"}</strong>
-          ${p.account ? `<span class="acct">· ${p.account}</span>` : ""}
-        </div>
-        ${p.detail ? `<div class="detail">${p.detail}</div>` : ""}
-        <div class="meta">${(p.models || [])
-          .map((m) => `<span class="tag">${m}</span>`)
-          .join("")}</div>
-      </div>`
-        )
+        .map((p) => {
+          if (p.name === "claude" && p.detail) {
+            const rm = parseClaudeReset(p.detail);
+            if (rm) claudeResetMs = rm;
+          }
+          const cardId = `card-${p.name}`;
+          if (p.name === "claude" && claudeResetMs) {
+            countdowns.push({ id: cardId, resetMs: claudeResetMs });
+          }
+          return `
+        <div class="card ${p.logged_in ? "" : "off"}" id="${cardId}">
+          <h3>${p.title || p.name}</h3>
+          <div class="who">${p.name}</div>
+          <div class="statusline">
+            ${dot(p.logged_in)}
+            <strong>${p.logged_in ? "已登录" : "未登录"}</strong>
+            ${p.account ? `<span class="acct">· ${p.account}</span>` : ""}
+            ${p.name === "claude" && claudeResetMs ? `<span class="health-countdown"></span>` : ""}
+          </div>
+          ${p.detail && !(p.name === "claude" && claudeResetMs) ? `<div class="detail">${p.detail}</div>` : ""}
+          <div class="meta">${(p.models || []).map((m) => `<span class="tag">${m}</span>`).join("")}</div>
+        </div>`;
+        })
         .join("") || `<div class="empty">无 provider</div>`;
 
-    $("#endpoints").innerHTML =
-      providers
-        .map(
-          (p) =>
-            `<div class="ep"><span class="name">${p.name}</span><code>POST ${location.origin}${p.endpoint}</code></div>`
-        )
-        .join("");
+    $("#endpoints").innerHTML = providers
+      .map((p) => `<div class="ep"><span class="name">${p.name}</span><code>POST ${location.origin}${p.endpoint}</code></div>`)
+      .join("");
+
+    // 整体健康
+    if (!providers.length) {
+      setHealth("warn", "未检测到 provider");
+    } else {
+      const onCount = providers.filter((p) => p.logged_in).length;
+      if (onCount === providers.length) {
+        setHealth("ok", `全部就绪 · ${onCount}/${providers.length} 已登录`, claudeResetMs);
+      } else {
+        setHealth("warn", `部分未登录 · ${onCount}/${providers.length}`, claudeResetMs);
+      }
+    }
+
+    if (claudeResetMs && !countdownTimer) {
+      countdownTimer = setInterval(tickCountdown, 1000);
+      tickCountdown();
+    }
   } catch (e) {
+    lastProvidersOK = false;
     $("#cards").innerHTML = `<div class="empty">无法连接到 ferridex</div>`;
+    setHealth("bad", "无法连接到 ferridex");
   }
 }
 
-function fmtStatus(n) {
-  const cls = n >= 400 ? "err" : "ok";
-  return `<span class="${cls}">${n}</span>`;
+/* ===== 实时日志:筛选 / 暂停 / 清空 / 计数 / 重连 ===== */
+let logFilter = "all"; // all | 2 | 4 | 5
+let logPaused = false;
+let logTotal = 0; // 本次会话累计
+let pendingNew = 0; // 暂停期间新增条数
+const MAX_LOG = 300;
+
+function statusClass(n) {
+  if (n >= 500) return "s5";
+  if (n >= 400) return "s4";
+  if (n >= 200 && n < 300) return "s2";
+  if (n >= 300) return "so";
+  return "s4";
+}
+
+function logLineHTML(o) {
+  return `<span class="t">${o.time}</span>  <span class="m">${o.method}</span> ${o.path} <span class="s ${statusClass(o.status)}">${o.status}</span> <span class="t">${o.dur}</span>`;
+}
+
+function updateLogCount(displayed) {
+  $("#log-count").textContent = `${logTotal} / ${displayed}`;
+}
+
+function applyFilter() {
+  let shown = 0;
+  $$("#log .logline").forEach((line) => {
+    const n = +line.dataset.status;
+    const match = logFilter === "all" || Math.floor(n / 100) === +logFilter;
+    line.style.display = match ? "" : "none";
+    if (match) shown++;
+  });
+  updateLogCount(shown);
+}
+
+function scrollLogBottom() {
+  const box = $("#log");
+  box.scrollTop = box.scrollHeight;
 }
 
 function startLogs() {
   const box = $("#log");
-  const es = new EventSource("/api/logs/stream");
-  es.onopen = () => $("#livedot").classList.add("on");
-  es.onerror = () => $("#livedot").classList.remove("on");
-  es.onmessage = (e) => {
-    let o;
-    try {
-      o = JSON.parse(e.data);
-    } catch {
-      return;
+  let backoff = 1000;
+
+  function connect() {
+    const es = new EventSource("/api/logs/stream");
+    es.onopen = () => {
+      $("#livedot").classList.add("on");
+      backoff = 1000;
+    };
+    es.onerror = () => {
+      $("#livedot").classList.remove("on");
+      es.close();
+      // 指数退避重连,上限 10s。
+      setTimeout(connect, Math.min(backoff, 10000));
+      backoff = Math.min(backoff * 2, 10000);
+    };
+    es.onmessage = (e) => {
+      let o;
+      try { o = JSON.parse(e.data); } catch { return; }
+      if (o.path === undefined) return;
+      const empty = box.querySelector(".empty");
+      if (empty) empty.remove();
+
+      logTotal++;
+      const line = document.createElement("div");
+      line.className = "logline";
+      line.dataset.status = o.status;
+      line.innerHTML = logLineHTML(o);
+      const match = logFilter === "all" || Math.floor(o.status / 100) === +logFilter;
+      line.style.display = match ? "" : "none";
+      box.appendChild(line);
+
+      while (box.childElementCount > MAX_LOG) box.firstElementChild.remove();
+
+      if (logPaused) {
+        pendingNew++;
+        $("#new-count").textContent = pendingNew;
+        $("#new-logs").hidden = false;
+      } else {
+        scrollLogBottom();
+      }
+      applyFilter();
+    };
+  }
+  connect();
+
+  // 筛选段
+  $$(".seg-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $$(".seg-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      logFilter = btn.dataset.filter;
+      applyFilter();
+    });
+  });
+
+  // 暂停滚动
+  $("#log-pause").addEventListener("click", () => {
+    logPaused = !logPaused;
+    const btn = $("#log-pause");
+    btn.setAttribute("aria-pressed", String(logPaused));
+    btn.textContent = logPaused ? "继续滚动" : "暂停滚动";
+    if (!logPaused) {
+      pendingNew = 0;
+      $("#new-logs").hidden = true;
+      scrollLogBottom();
     }
-    if (o.path === undefined) return;
-    const empty = box.querySelector(".empty");
-    if (empty) empty.remove();
-    const line = document.createElement("div");
-    line.className = "logline";
-    line.innerHTML = `<span class="t">${o.time}</span>  <span class="m">${o.method}</span> ${o.path} ${fmtStatus(
-      o.status
-    )} <span class="t">${o.dur}</span>`;
-    box.appendChild(line);
-    box.scrollTop = box.scrollHeight;
-    while (box.childElementCount > 300) box.firstElementChild.remove();
-  };
+  });
+
+  // 清空
+  $("#log-clear").addEventListener("click", () => {
+    box.innerHTML = `<div class="empty">已清空显示（后端缓冲不受影响）</div>`;
+    applyFilter();
+  });
+
+  // 跳到最新
+  $("#new-logs").addEventListener("click", () => {
+    pendingNew = 0;
+    $("#new-logs").hidden = true;
+    scrollLogBottom();
+  });
+}
+
+/* ===== SSH 隧道 ===== */
+function fmtUptime(sec) {
+  if (!sec || sec < 0) return "0s";
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m >= 60) {
+    const h = Math.floor(m / 60);
+    return `${h}h ${m % 60}m`;
+  }
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
 async function loadTunnel() {
@@ -216,16 +443,30 @@ async function loadTunnel() {
     const r = await fetch("/api/tunnel");
     const d = await r.json();
     const st = d.status || {};
-    $("#tun-dot").className = "dot " + (st.running ? "on" : "off");
+    const panel = $("#tunnel-panel");
+    const badge = $("#tun-badge");
+
+    panel.classList.toggle("is-running", !!st.running);
+    panel.classList.toggle("is-error", !st.running && !!st.last_error);
+
+    badge.className = "badge " + (st.running ? "badge-on" : "badge-off");
+    badge.textContent = st.running ? "运行中" : st.last_error ? "异常" : "未运行";
+
     const remoteEl = $("#tun-remote");
     const keyEl = $("#tun-key");
     if (document.activeElement !== remoteEl && !remoteEl.value && d.remote) remoteEl.value = d.remote;
     if (document.activeElement !== keyEl && !keyEl.value && d.key) keyEl.value = d.key;
+
     $("#tun-start").disabled = !!st.running;
     $("#tun-stop").disabled = !st.running;
-    $("#tun-info").textContent = st.running
-      ? `运行中 · pid ${st.pid} · ${st.uptime_sec}s · 远端端口 ${st.remote_port}（远端客户端连 127.0.0.1:${st.remote_port}）`
-      : "未运行";
+
+    if (st.running) {
+      const parts = [`<span class="pill">pid ${st.pid}</span>`, `<span class="pill">已运行 ${fmtUptime(st.uptime_sec)}</span>`];
+      if (st.remote_port) parts.push(`<span class="pill hl">远端端口 ${st.remote_port}</span>`);
+      $("#tun-info").innerHTML = parts.join("");
+    } else {
+      $("#tun-info").textContent = st.last_error ? "" : "未运行";
+    }
     $("#tun-err").textContent = st.last_error || "";
   } catch (e) {}
 }
@@ -239,20 +480,30 @@ async function tunnelAction(path, body) {
       body: JSON.stringify(body || {}),
     });
     const d = await r.json();
-    $("#tun-err").textContent = d.error || "";
+    if (d.error) {
+      $("#tun-err").textContent = d.error;
+      toast("隧道操作失败", "err");
+    } else {
+      toast(body && body.remote ? "隧道已启动" : "隧道已停止");
+    }
   } catch (e) {
     $("#tun-err").textContent = String(e);
+    toast("隧道操作失败", "err");
   }
   loadTunnel();
 }
+
+/* ===== 启动 ===== */
+initTheme();
 
 $("#tun-start").addEventListener("click", () =>
   tunnelAction("/api/tunnel/start", { remote: $("#tun-remote").value, key: $("#tun-key").value })
 );
 $("#tun-stop").addEventListener("click", () => tunnelAction("/api/tunnel/stop", {}));
 
-$("#log").innerHTML =
-  `<div class="empty">等待请求…(对 /v1/responses 或 /v1/messages 发一次请求即可看到)</div>`;
+$("#log").innerHTML = `<div class="empty">等待请求…(对 /v1/responses 或 /v1/messages 发一次请求即可看到)</div>`;
+updateLogCount(0);
+
 loadNetinfo();
 startCopyButtons();
 startAccordions();
