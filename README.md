@@ -1,7 +1,7 @@
 # ferridex
 
-`ferridex` 是一个运行在本机的 Go 代理，复用已经登录的 ChatGPT/Codex 与
-Claude Code 订阅，并向本机或通过 SSH 隧道连接的远程主机提供兼容接口。
+`ferridex` 是一个运行在本机的 Go 代理，复用已经登录的 ChatGPT/Codex、
+Claude Code 与 Cursor CLI 订阅，并向本机或通过 SSH 隧道连接的远程主机提供兼容接口。
 
 > 本项目调用非公开上游端点并读取本机登录凭据，仅适合个人研究和自用。
 > 上游协议、客户端指纹或服务条款变化都可能导致功能失效。不要共享、转售
@@ -11,11 +11,12 @@ Claude Code 订阅，并向本机或通过 SSH 隧道连接的远程主机提供
 
 - `POST /v1/responses`：转发 OpenAI Responses 协议请求到 Codex 后端。
 - `POST /v1/messages`：转发 Anthropic Messages 协议请求到 Claude 后端。
+- Connect-RPC（`/agent.v1.*`、`/aiserver.v1.*` 等）：透明转发 Cursor CLI 请求。
 - `GET /healthz`：健康检查。
 - `GET /`：统一面板，显示登录状态、端点、实时日志和 SSH 隧道状态。
-- 面板可一键复制远程 Codex、Claude Code 配置。
+- 面板可一键复制远程 Codex、Claude Code、Cursor CLI 配置。
 - 面板可启动和停止绑定远端回环地址的 SSH 反向隧道。
-- 自动读取并刷新本机 Codex/Claude 登录令牌。
+- 自动读取并刷新本机 Codex/Claude/Cursor 登录令牌。
 - 可选下游 API Key，避免本机或隧道中的其他进程直接调用代理。
 
 ## 工作方式
@@ -44,10 +45,36 @@ codex login
 
 运行前先安装 Claude Code 并完成订阅登录。
 
+### Cursor
+
+`ferridex` 依次读取：
+
+1. `~/.ferridex/cursor-creds.json` 中的有效缓存；
+2. `~/.config/cursor/auth.json`（Cursor CLI 登录）；
+3. macOS Keychain 中的 `cursor-access-token`；
+4. Cursor IDE 的 `state.vscdb`（需本机安装 `sqlite3`）。
+
+刷新后的 Cursor 令牌会写入 `~/.ferridex/cursor-creds.json`。
+
+运行前先安装 Cursor CLI 并完成订阅登录：
+
+```bash
+cursor agent login
+```
+
+远程 Cursor CLI 通过 `-e` 指向 ferridex；ferridex 会把下游占位 token 替换为
+本机订阅 token 后转发到官方 `api2.cursor.sh` / `agentn.global.api5.cursor.sh`。
+
+**注意：** 端点必须用 `http://localhost:<端口>`，不能用 `127.0.0.1`。Cursor CLI
+只在 host 为 `localhost` 时才会把 agent 流量也走代理；用 `127.0.0.1` 时 api2
+请求会走 ferridex，但 agent 聊天仍直连官方服务器并触发登录。另外请用
+`agent -e ... --auth-token dummy` 显式传参，仅 `export CURSOR_API_ENDPOINT=...`
+不够（CLI 默认 endpoint 会覆盖环境变量）。
+
 ## 环境要求
 
 - Go 1.23 或更高版本。
-- 已完成订阅登录的 Codex CLI 和/或 Claude Code。
+- 已完成订阅登录的 Codex CLI、Claude Code 和/或 Cursor CLI。
 - 使用面板管理反向隧道时，需要本机安装 `ssh`，并使用免密密钥或
   已加载到 `ssh-agent` 的密钥。
 
@@ -75,7 +102,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ## 启动
 
 ```bash
-# 同时启动 Codex、Claude 和 Web 面板，并自动打开浏览器
+# 同时启动 Codex、Claude、Cursor 和 Web 面板，并自动打开浏览器
 ferridex serve
 
 # 使用指定端口启动统一网关
@@ -93,6 +120,7 @@ ferridex serve -lan
 # 只启动一个代理，不提供 Web 面板
 ferridex codex
 ferridex claude
+ferridex cursor
 
 # 检查本机登录状态
 ferridex status
@@ -114,13 +142,14 @@ http://127.0.0.1:8788/
 
 面板提供：
 
-- Codex 和 Claude 登录状态；
+- Codex、Claude 和 Cursor 登录状态；
 - 当前代理端点；
 - Claude Code `~/.claude/settings.json` 配置一键复制；
 - Codex `~/.codex/config.toml` 配置一键复制；
 - `export LOCAL_PROXY_KEY=dummy` 命令一键复制；
+- Cursor CLI `agent -e ... --auth-token ...` 命令一键复制；
 - SSH 反向隧道管理；
-- `/v1/responses` 和 `/v1/messages` 请求日志。
+- `/v1/responses`、`/v1/messages` 和 Cursor Connect-RPC 请求日志。
 
 复制出的配置会自动跟随面板当前端口，包括 `-auto-port` 自动切换后的端口。
 
@@ -142,13 +171,14 @@ ferridex serve -lan
   自动切换到后续可用端口。
 - 自动生成一个访问密钥并写入 `~/.ferridex/config.json` 的 `lan_key`
   （重启保持不变）。如果你已设置 `downstream_key`，则沿用它。
-- **只把 AI 接口开放到局域网**：`/v1/responses`、`/v1/messages`、`/healthz`。
+- **只把 AI 接口开放到局域网**：`/v1/responses`、`/v1/messages`、Cursor
+  Connect-RPC 路径和 `/healthz`。
   Web 面板和 SSH 隧道控制接口仍然仅限本机（loopback），局域网访问会返回
   `403`。
 - 局域网请求必须携带密钥；A 本机 `127.0.0.1` 的本地使用仍然免密钥。
 
 在 A 上打开面板 `http://127.0.0.1:8788/`，「远程客户端配置」面板会显示局域网
-地址和密钥，并把密钥写入一键复制的 Claude / Codex 配置。把对应配置复制到另一
+地址和密钥，并把密钥写入一键复制的 Claude / Codex / Cursor 配置。把对应配置复制到另一
 台电脑（B）即可：
 
 - Claude Code：写入 B 的 `~/.claude/settings.json`（`ANTHROPIC_BASE_URL` 指向
@@ -156,6 +186,8 @@ ferridex serve -lan
 - Codex：写入 B 的 `~/.codex/config.toml`（`base_url` 指向
   `http://192.168.x.x:8788/v1`），并在启动前执行
   `export LOCAL_PROXY_KEY=<密钥>` 后运行 `codex`。
+- Cursor CLI：在 B 上执行面板复制的一行命令，例如
+  `agent -e http://192.168.x.x:8788 --auth-token <密钥>`。
 
 在 B 上先验证连通性：
 
@@ -200,7 +232,7 @@ ssh -N \
 ```
 
 也可以在 Web 面板中填写 `user@host` 和 SSH key 路径启动隧道。远程主机
-安装 Codex 或 Claude Code 后，打开面板并复制对应配置即可。
+安装 Codex、Claude Code 或 Cursor CLI 后，打开面板并复制对应配置即可。
 
 通过面板启动隧道时，如果远端的转发端口被占用（报
 `remote port forwarding failed for listen port ...`），ferridex 会**自动改用
@@ -284,10 +316,44 @@ OpenAI API Key，也不会替代远程主机的 `~/.codex/auth.json`。
 `danger-full-access`。它们会降低命令执行确认和沙箱限制，只应在可信远程主机
 与可信项目中使用。
 
+#### Cursor CLI
+
+在远程 shell 中执行（端口以面板「远端端口」为准；SSH 隧道场景下远程也是
+`localhost`）：
+
+```bash
+agent -e http://localhost:8789 --auth-token dummy
+```
+
+`--auth-token dummy` 是占位凭据；ferridex 会替换为本机 Cursor 订阅 token。
+远程主机**不需要**单独登录 Cursor 订阅。不要用 `127.0.0.1` 代替 `localhost`，
+也不要只设 `CURSOR_API_ENDPOINT` 环境变量而不传 `-e`。
+
+若 Connect-RPC 连接异常，可在远程 `~/.cursor/cli-config.json` 中设置
+`"network": { "useHttp1ForAgent": true }` 作为 HTTP/2 降级方案。
+
 远程验证：
 
 ```bash
 curl -sS http://127.0.0.1:8789/healthz
+```
+
+已验证示例（SSH 反向隧道 + 远程 Cursor CLI，端口以面板「远端端口」为准）：
+
+```bash
+# 1. 确认隧道连通（healthz 用 127.0.0.1 即可）
+curl -sS http://127.0.0.1:8788/healthz
+
+# 2. 启动 agent（必须用 localhost + 显式 -e，不能只 export 环境变量）
+agent -e http://localhost:8788 --auth-token dummy
+```
+
+以下写法**不会**走 ferridex 订阅代理，会弹出浏览器登录：
+
+```bash
+export CURSOR_API_ENDPOINT=http://127.0.0.1:8788   # 无效：CLI 默认 endpoint 会覆盖
+export CURSOR_AUTH_TOKEN=dummy
+agent                                                # 缺少 -e，且 127.0.0.1 不会代理 agent 流量
 ```
 
 ## 冒烟测试
@@ -331,7 +397,7 @@ Authorization: Bearer replace-with-a-random-secret
 X-API-Key: replace-with-a-random-secret
 ```
 
-不要把 `~/.ferridex/config.json`、Codex/Claude 凭据文件或真实密钥提交到
+不要把 `~/.ferridex/config.json`、Codex/Claude/Cursor 凭据文件或真实密钥提交到
 Git 仓库。
 
 ## 开发与检查
@@ -342,7 +408,8 @@ go vet ./...
 go build ./...
 ```
 
-`go test ./...` 包含 Claude 限额识别、熔断缓存和响应头透传的自动化测试。
+`go test ./...` 包含 Claude 限额识别、熔断缓存、响应头透传，以及 Cursor
+Connect-RPC 路径识别的自动化测试。
 
 ## Claude 限额熔断
 
@@ -358,8 +425,9 @@ Claude 上游返回 `429` 时，ferridex 会区分订阅额度耗尽与瞬态限
 
 ## 已知限制
 
-- Codex 与 Claude 使用的上游端点、OAuth 参数和客户端指纹可能随时变化。
+- Codex、Claude 与 Cursor 使用的上游端点、OAuth 参数和客户端指纹可能随时变化。
 - Claude 转发会模拟 Claude Code 的请求特征，兼容性取决于当前上游行为。
+- Cursor 转发为 Connect-RPC 透明反代，兼容性取决于当前 Cursor CLI 行为。
 - 模型名称和账号权限必须与实际订阅一致。
 - 实时日志仅记录请求路径、状态码和耗时，不记录请求正文。
 - 反向隧道会让远程主机上的进程访问本机代理，应仅连接可信主机。

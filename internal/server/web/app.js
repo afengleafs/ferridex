@@ -100,6 +100,13 @@ function proxyHost() {
 function proxyBaseURL() {
   return `http://${proxyHost()}:${currentPort()}`;
 }
+// Cursor CLI only routes agent traffic through a custom endpoint when the host
+// is "localhost" (127.0.0.1 bypasses the proxy and hits agentn.* directly).
+function cursorBaseURL(port) {
+  const host = proxyHost();
+  const cursorHost = host === "127.0.0.1" ? "localhost" : host;
+  return `http://${cursorHost}:${port || currentPort()}`;
+}
 function authToken() {
   return netinfo.lan_key || "dummy";
 }
@@ -143,6 +150,7 @@ requires_openai_auth = false`;
   $("#claude-config").textContent = JSON.stringify(claude, null, 2);
   $("#codex-config").textContent = codex;
   $("#codex-env").textContent = `export LOCAL_PROXY_KEY=${token}`;
+  $("#cursor-config").textContent = `agent -e ${cursorBaseURL()} --auth-token ${token}`;
 }
 
 async function loadNetinfo() {
@@ -216,8 +224,7 @@ function tickCountdown() {
     const span = el.querySelector(".health-countdown");
     const txt = fmtCountdown(c.resetMs - now);
     if (span) {
-      if (txt) span.textContent = " · " + txt;
-      else span.textContent = "";
+      span.textContent = txt || "";
     }
   });
 }
@@ -226,7 +233,7 @@ function setHealth(state, text, countdownMs) {
   const bar = $("#healthbar");
   bar.classList.remove("ok", "warn", "bad");
   if (state) bar.classList.add(state);
-  $("#health-dot").className = "dot";
+  $("#health-dot").className = "dot hero-dot";
   if (state === "ok") $("#health-dot").classList.add("on");
   else if (state === "bad") $("#health-dot").classList.add("off");
   let extra = "";
@@ -238,6 +245,43 @@ function setHealth(state, text, countdownMs) {
 
 let lastProvidersOK = false;
 let lastDetail = {};
+
+// 记住被手动收起的 provider 卡片(按 name),让每 5 秒的重渲染保持折叠状态。
+const collapsedCards = new Set();
+
+/* ===== 订阅用量进度条 ===== */
+function usageLevel(frac) {
+  if (frac >= 0.9) return "bad";
+  if (frac >= 0.7) return "warn";
+  return "ok";
+}
+
+function fmtResetIn(resetsAt) {
+  if (!resetsAt) return "";
+  const s = Math.round(resetsAt * 1000 - Date.now()) / 1000;
+  if (s <= 0) return "已重置";
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h >= 24) return `${Math.floor(h / 24)} 天后重置`;
+  if (h > 0) return `${h} 时 ${m} 分后重置`;
+  if (m > 0) return `${m} 分后重置`;
+  return `${Math.round(s)} 秒后重置`;
+}
+
+function usageBar(u) {
+  const frac = Math.max(0, Math.min(1, u.utilization || 0));
+  const pct = Math.round(frac * 100);
+  const reset = fmtResetIn(u.resets_at);
+  return `
+    <div class="usage-row">
+      <div class="usage-top">
+        <span class="usage-label">${u.label || ""}</span>
+        <span class="usage-pct">${pct}%</span>
+      </div>
+      <div class="bar"><div class="bar-fill ${usageLevel(frac)}" style="width:${pct}%"></div></div>
+      ${reset ? `<div class="usage-reset">${reset}</div>` : ""}
+    </div>`;
+}
 
 async function loadStatus() {
   try {
@@ -257,27 +301,41 @@ async function loadStatus() {
             if (rm) claudeResetMs = rm;
           }
           const cardId = `card-${p.name}`;
-          if (p.name === "claude" && claudeResetMs) {
+          const claudeCounting = p.name === "claude" && claudeResetMs;
+          if (claudeCounting) {
             countdowns.push({ id: cardId, resetMs: claudeResetMs });
           }
+          const collapsedClass = collapsedCards.has(p.name) ? " collapsed" : "";
           return `
-        <div class="card ${p.logged_in ? "" : "off"}" id="${cardId}">
-          <h3>${p.title || p.name}</h3>
-          <div class="who">${p.name}</div>
-          <div class="statusline">
-            ${dot(p.logged_in)}
-            <strong>${p.logged_in ? "已登录" : "未登录"}</strong>
-            ${p.account ? `<span class="acct">· ${p.account}</span>` : ""}
-            ${p.name === "claude" && claudeResetMs ? `<span class="health-countdown"></span>` : ""}
+        <div class="card ${p.logged_in ? "" : "off"}${collapsedClass}" id="${cardId}">
+          <div class="card-head">
+            <span class="caret" aria-hidden="true">▸</span>
+            <div class="card-head-main">
+              <h3>${p.title || p.name}</h3>
+              <span class="who">${p.name}</span>
+            </div>
+            <span class="card-head-status">
+              ${dot(p.logged_in)}
+              <strong>${p.logged_in ? "已登录" : "未登录"}</strong>
+            </span>
           </div>
-          ${p.detail && !(p.name === "claude" && claudeResetMs) ? `<div class="detail">${p.detail}</div>` : ""}
-          <div class="meta">${(p.models || []).map((m) => `<span class="tag">${m}</span>`).join("")}</div>
+          <div class="card-body">
+            ${p.account ? `<div class="acct">${p.account}</div>` : ""}
+            ${claudeCounting ? `<div class="detail"><span class="health-countdown"></span></div>` : (p.detail ? `<div class="detail">${p.detail}</div>` : "")}
+            ${p.usage && p.usage.length ? `<div class="usage">${p.usage.map(usageBar).join("")}</div>` : ""}
+            <div class="meta">${(p.models || []).map((m) => `<span class="tag">${m}</span>`).join("")}</div>
+          </div>
         </div>`;
         })
         .join("") || `<div class="empty">无 provider</div>`;
 
     $("#endpoints").innerHTML = providers
-      .map((p) => `<div class="ep"><span class="name">${p.name}</span><code>POST ${location.origin}${p.endpoint}</code></div>`)
+      .map((p) => {
+        if (p.name === "cursor") {
+          return `<div class="ep"><span class="name">${p.name}</span><code>agent -e ${cursorBaseURL()} --auth-token ${authToken()}</code></div>`;
+        }
+        return `<div class="ep"><span class="name">${p.name}</span><code>POST ${location.origin}${p.endpoint}</code></div>`;
+      })
       .join("");
 
     // 整体健康
@@ -500,6 +558,17 @@ $("#tun-start").addEventListener("click", () =>
   tunnelAction("/api/tunnel/start", { remote: $("#tun-remote").value, key: $("#tun-key").value })
 );
 $("#tun-stop").addEventListener("click", () => tunnelAction("/api/tunnel/stop", {}));
+
+// provider 卡片折叠:委托绑在常驻的 #cards 上,5 秒重渲染后依旧生效。
+$("#cards").addEventListener("click", (e) => {
+  const head = e.target.closest(".card-head");
+  if (!head) return;
+  const card = head.closest(".card");
+  if (!card) return;
+  const name = card.id.slice(5); // 去掉 "card-" 前缀
+  if (card.classList.toggle("collapsed")) collapsedCards.add(name);
+  else collapsedCards.delete(name);
+});
 
 $("#log").innerHTML = `<div class="empty">等待请求…(对 /v1/responses 或 /v1/messages 发一次请求即可看到)</div>`;
 updateLogCount(0);

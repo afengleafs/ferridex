@@ -1,5 +1,5 @@
-// ferridex — 一个本地代理,用你已登录的 ChatGPT(Codex)与 Claude 订阅,
-// 暴露成 /v1/responses(Codex)和 /v1/messages(Claude),并带一个极简面板。
+// ferridex — 一个本地代理,用你已登录的 ChatGPT(Codex)、Claude 与 Cursor 订阅,
+// 暴露成 /v1/responses(Codex)、/v1/messages(Claude)、Connect-RPC(Cursor),并带一个极简面板。
 package main
 
 import (
@@ -8,6 +8,9 @@ import (
 	"log"
 	"os"
 	"strings"
+
+	"ferridex/internal/provider"
+	"ferridex/internal/server"
 )
 
 const defaultAddr = "127.0.0.1:8788"
@@ -29,18 +32,21 @@ func main() {
 	newKey := fs.Bool("new-key", false, "配合 -lan:强制重新生成局域网密钥 lan_key")
 	_ = fs.Parse(args)
 
-	codex := NewCodexProvider()
-	claude := NewClaudeProvider()
+	codex := provider.NewCodexProvider()
+	claude := provider.NewClaudeProvider()
+	cursor := provider.NewCursorProvider()
 
 	switch cmd {
 	case "serve":
-		runServe(*addr, !*noOpen, *lan, *newKey, *autoPort, codex, claude)
+		server.RunServe(*addr, !*noOpen, *lan, *newKey, *autoPort, codex, claude, cursor)
 	case "codex":
-		runSingle(*addr, *autoPort, codex)
+		server.RunSingle(*addr, *autoPort, codex)
 	case "claude":
-		runSingle(*addr, *autoPort, claude)
+		server.RunSingle(*addr, *autoPort, claude)
+	case "cursor":
+		server.RunSingle(*addr, *autoPort, cursor)
 	case "status":
-		printStatus(codex, claude)
+		server.PrintStatus(codex, claude, cursor)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -51,13 +57,14 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`ferridex — Codex + Claude 订阅本地代理
+	fmt.Print(`ferridex — Codex + Claude + Cursor 订阅本地代理
 
 用法:
-  ferridex serve     启动统一网关(Codex + Claude)+ 面板,自动开浏览器(默认命令)
+  ferridex serve     启动统一网关(Codex + Claude + Cursor)+ 面板,自动开浏览器(默认命令)
   ferridex codex     只起 Codex 代理(暴露 /v1/responses)
   ferridex claude    只起 Claude 代理(暴露 /v1/messages)
-  ferridex status    打印两边登录 / 健康状态
+  ferridex cursor    只起 Cursor 代理(Connect-RPC 透明反代)
+  ferridex status    打印各 provider 登录 / 健康状态
 
 选项:
   -addr <地址>   监听地址(默认 127.0.0.1:8788)

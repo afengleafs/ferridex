@@ -1,4 +1,4 @@
-package main
+package provider
 
 // CodexProvider relays to the ChatGPT/Codex backend used by the Codex CLI,
 // authenticating with the local ChatGPT subscription login (~/.codex/auth.json).
@@ -18,14 +18,21 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"ferridex/internal/util"
 )
 
 const (
 	codexBaseURL      = "https://chatgpt.com/backend-api/codex"
 	codexResponsesURL = codexBaseURL + "/responses"
+	codexUsageURL     = "https://chatgpt.com/backend-api/wham/usage"
 	codexRefreshURL   = "https://auth.openai.com/oauth/token"
 	codexClientID     = "app_EMoamEEZ73f0CkXaXp7hrann"
 	codexRefreshSkew  = 30 * time.Second
+
+	// codexUsageTTL bounds how often the dashboard polls the usage endpoint
+	// (same cadence as Claude; /api/status is polled every 5s).
+	codexUsageTTL = 90 * time.Second
 )
 
 var codexAuthMu sync.Mutex
@@ -34,14 +41,23 @@ type CodexProvider struct {
 	instructions string
 	renameMap    map[string]string
 	client       *http.Client
+
+	// subscription usage snapshot for the dashboard (async, never blocks Status).
+	usageMu       sync.Mutex
+	usage         []UsageWindow
+	usageAt       time.Time
+	usageInFlight bool
+	usageFetcher  func(context.Context) ([]UsageWindow, error) // seam for tests
 }
 
 func NewCodexProvider() *CodexProvider {
-	return &CodexProvider{
+	c := &CodexProvider{
 		instructions: "You are a helpful coding assistant.",
 		renameMap:    map[string]string{"web_search_preview": "web_search"},
 		client:       &http.Client{Timeout: 10 * time.Minute},
 	}
+	c.usageFetcher = c.fetchUsage
+	return c
 }
 
 func (c *CodexProvider) Name() string { return "codex" }
@@ -58,22 +74,23 @@ func (c *CodexProvider) Status() ProviderStatus {
 		st.Detail = "读取 auth.json 失败"
 		return st
 	}
-	if getString(doc, "auth_mode") != "chatgpt" {
+	if util.GetString(doc, "auth_mode") != "chatgpt" {
 		st.Detail = "auth_mode 非 chatgpt(需订阅登录)"
 		return st
 	}
-	tokens, _ := getMap(doc, "tokens")
-	if getString(tokens, "access_token") == "" {
+	tokens, _ := util.GetMap(doc, "tokens")
+	if util.GetString(tokens, "access_token") == "" {
 		st.Detail = "无 access_token"
 		return st
 	}
-	acct := getString(tokens, "account_id")
+	acct := util.GetString(tokens, "account_id")
 	if acct == "" {
-		acct = extractAccountID(getString(tokens, "id_token"), getString(tokens, "access_token"))
+		acct = extractAccountID(util.GetString(tokens, "id_token"), util.GetString(tokens, "access_token"))
 	}
 	st.LoggedIn = true
 	st.Account = acct
 	st.Detail = "ChatGPT 订阅"
+	st.Usage = c.usageSnapshot()
 	return st
 }
 
@@ -116,8 +133,8 @@ func (c *CodexProvider) Relay(w http.ResponseWriter, r *http.Request) {
 	contentType := upstreamResp.Header.Get("Content-Type")
 	if upstreamResp.StatusCode < 200 || upstreamResp.StatusCode >= 300 {
 		body, _ := io.ReadAll(upstreamResp.Body)
-		log.Printf("codex upstream HTTP %d: %s", upstreamResp.StatusCode, truncate(string(body), 2000))
-		w.Header().Set("Content-Type", firstNonEmpty(contentType, "application/json"))
+		log.Printf("codex upstream HTTP %d: %s", upstreamResp.StatusCode, util.Truncate(string(body), 2000))
+		w.Header().Set("Content-Type", util.FirstNonEmpty(contentType, "application/json"))
 		w.WriteHeader(upstreamResp.StatusCode)
 		_, _ = w.Write(body)
 		return
@@ -276,13 +293,13 @@ type streamingResponseState struct {
 	sawMessageItem bool
 }
 
-func parseCodexStreamEvent(ev sseEvent) (codexStreamEvent, string, bool) {
+func parseCodexStreamEvent(ev util.SSEEvent) (codexStreamEvent, string, bool) {
 	var streamEvent codexStreamEvent
 	data := strings.TrimSpace(ev.Data)
 	if err := json.Unmarshal([]byte(data), &streamEvent); err != nil {
 		return streamEvent, ev.EventType, false
 	}
-	return streamEvent, firstNonEmpty(streamEvent.Type, ev.EventType), true
+	return streamEvent, util.FirstNonEmpty(streamEvent.Type, ev.EventType), true
 }
 
 func (s *streamingResponseState) rememberOutputItem(item json.RawMessage) {
@@ -300,27 +317,27 @@ func (s *streamingResponseState) rememberOutputItem(item json.RawMessage) {
 
 func (s *streamingResponseState) emitTerminalEvent(emit func(string, string) error, eventType string, response json.RawMessage) error {
 	if responseHasOutput(response) {
-		return emit(eventType, marshalJSONLine(map[string]any{"type": eventType, "response": json.RawMessage(response)}))
+		return emit(eventType, util.MarshalJSONLine(map[string]any{"type": eventType, "response": json.RawMessage(response)}))
 	}
 	finalOutput := make([]json.RawMessage, 0, len(s.outputItems)+1)
 	finalOutput = append(finalOutput, s.outputItems...)
 	if s.textBuilder.Len() > 0 && !s.sawMessageItem {
-		messageItem := mustMarshalRaw(syntheticMessageItem{
+		messageItem := util.MustMarshalRaw(syntheticMessageItem{
 			ID: "msg_proxy_0", Type: "message", Role: "assistant", Status: "completed",
 			Content: []syntheticMessageContent{{Type: "output_text", Text: s.textBuilder.String()}},
 		})
 		finalOutput = append(finalOutput, messageItem)
-		if err := emit("response.output_item.done", marshalJSONLine(map[string]any{
+		if err := emit("response.output_item.done", util.MarshalJSONLine(map[string]any{
 			"type": "response.output_item.done", "output_index": len(finalOutput) - 1, "item": messageItem,
 		})); err != nil {
 			return err
 		}
 	}
 	if len(finalOutput) == 0 {
-		return emit(eventType, marshalJSONLine(map[string]any{"type": eventType, "response": json.RawMessage(response)}))
+		return emit(eventType, util.MarshalJSONLine(map[string]any{"type": eventType, "response": json.RawMessage(response)}))
 	}
 	patched := ensureResponseOutput(response, finalOutput, s.fallbackModel)
-	return emit(eventType, marshalJSONLine(map[string]any{"type": eventType, "response": json.RawMessage(patched)}))
+	return emit(eventType, util.MarshalJSONLine(map[string]any{"type": eventType, "response": json.RawMessage(patched)}))
 }
 
 func ensureResponseOutput(raw json.RawMessage, output []json.RawMessage, fallbackModel string) json.RawMessage {
@@ -329,19 +346,19 @@ func ensureResponseOutput(raw json.RawMessage, output []json.RawMessage, fallbac
 		response = make(map[string]any)
 	}
 	now := time.Now().Unix()
-	if getString(response, "id") == "" {
+	if util.GetString(response, "id") == "" {
 		response["id"] = fmt.Sprintf("resp_proxy_%d", now)
 	}
-	if getString(response, "object") == "" {
+	if util.GetString(response, "object") == "" {
 		response["object"] = "response"
 	}
 	if _, ok := response["created_at"]; !ok {
 		response["created_at"] = now
 	}
-	if getString(response, "status") == "" {
+	if util.GetString(response, "status") == "" {
 		response["status"] = "completed"
 	}
-	if getString(response, "model") == "" {
+	if util.GetString(response, "model") == "" {
 		response["model"] = fallbackModel
 	}
 	if v, ok := response["usage"]; !ok || v == nil {
@@ -351,7 +368,7 @@ func ensureResponseOutput(raw json.RawMessage, output []json.RawMessage, fallbac
 		response["error"] = nil
 	}
 	response["output"] = output
-	return mustMarshalRaw(response)
+	return util.MustMarshalRaw(response)
 }
 
 func streamSSEToResponses(w http.ResponseWriter, body io.Reader, fallbackModel string) error {
@@ -386,7 +403,7 @@ func streamSSEToResponses(w http.ResponseWriter, body io.Reader, fallbackModel s
 		return nil
 	}
 
-	err := iterSSEEvents(body, func(ev sseEvent) error {
+	err := util.IterSSEEvents(body, func(ev util.SSEEvent) error {
 		data := strings.TrimSpace(ev.Data)
 		if data == "" || data == "[DONE]" {
 			return nil
@@ -404,10 +421,10 @@ func streamSSEToResponses(w http.ResponseWriter, body io.Reader, fallbackModel s
 				return emit(eventType, data)
 			}
 		}
-		return emit(firstNonEmpty(eventType, ev.EventType), data)
+		return emit(util.FirstNonEmpty(eventType, ev.EventType), data)
 	})
 	if err != nil {
-		_ = emit("error", marshalJSONLine(map[string]any{"type": "error", "message": "failed to read upstream stream: " + err.Error()}))
+		_ = emit("error", util.MarshalJSONLine(map[string]any{"type": "error", "message": "failed to read upstream stream: " + err.Error()}))
 		return err
 	}
 	return nil
@@ -421,7 +438,7 @@ func convertSSEToResponsesJSON(body io.Reader, fallbackModel string) ([]byte, er
 	var nonMessageItems []json.RawMessage
 	var messageItem json.RawMessage
 
-	err := iterSSEEvents(body, func(ev sseEvent) error {
+	err := util.IterSSEEvents(body, func(ev util.SSEEvent) error {
 		data := strings.TrimSpace(ev.Data)
 		if data == "" || data == "[DONE]" {
 			return nil
@@ -498,7 +515,7 @@ func convertSSEToResponsesJSON(body io.Reader, fallbackModel string) ([]byte, er
 
 	var output []json.RawMessage
 	if textBuilder.Len() > 0 {
-		output = append(output, mustMarshalRaw(syntheticMessageItem{
+		output = append(output, util.MustMarshalRaw(syntheticMessageItem{
 			ID: "msg_proxy_0", Type: "message", Role: "assistant", Status: "completed",
 			Content: []syntheticMessageContent{{Type: "output_text", Text: textBuilder.String()}},
 		}))
@@ -508,7 +525,7 @@ func convertSSEToResponsesJSON(body io.Reader, fallbackModel string) ([]byte, er
 	output = append(output, nonMessageItems...)
 
 	if len(upstreamError) > 0 {
-		return nil, fmt.Errorf("Codex stream ended with error: %s", truncate(string(upstreamError), 1000))
+		return nil, fmt.Errorf("Codex stream ended with error: %s", util.Truncate(string(upstreamError), 1000))
 	}
 	if completed.Status == "failed" || completed.Status == "incomplete" || completed.Status == "cancelled" {
 		return nil, fmt.Errorf("Codex stream ended with status %q and no output", completed.Status)
@@ -556,18 +573,18 @@ func borrowCodexKey(ctx context.Context) (accessToken string, accountID string, 
 	if err != nil {
 		return "", "", err
 	}
-	if getString(auth, "auth_mode") != "chatgpt" {
-		return "", "", fmt.Errorf("expected auth_mode 'chatgpt', got %q; run `codex login`", getString(auth, "auth_mode"))
+	if util.GetString(auth, "auth_mode") != "chatgpt" {
+		return "", "", fmt.Errorf("expected auth_mode 'chatgpt', got %q; run `codex login`", util.GetString(auth, "auth_mode"))
 	}
-	tokens, ok := getMap(auth, "tokens")
+	tokens, ok := util.GetMap(auth, "tokens")
 	if !ok {
 		return "", "", errors.New("no tokens object found in auth.json; run `codex login`")
 	}
 
-	accessToken = getString(tokens, "access_token")
-	refreshToken := getString(tokens, "refresh_token")
-	idToken := getString(tokens, "id_token")
-	accountID = getString(tokens, "account_id")
+	accessToken = util.GetString(tokens, "access_token")
+	refreshToken := util.GetString(tokens, "refresh_token")
+	idToken := util.GetString(tokens, "id_token")
+	accountID = util.GetString(tokens, "account_id")
 	if accountID == "" {
 		accountID = extractAccountID(idToken, accessToken)
 		if accountID != "" {
@@ -578,7 +595,7 @@ func borrowCodexKey(ctx context.Context) (accessToken string, accountID string, 
 		return "", "", errors.New("no access_token found; run `codex login`")
 	}
 
-	if expiry, ok := jwtExpiry(accessToken); ok && time.Now().Before(expiry.Add(-codexRefreshSkew)) {
+	if expiry, ok := util.JWTExpiry(accessToken); ok && time.Now().Before(expiry.Add(-codexRefreshSkew)) {
 		if accountID != "" {
 			auth["tokens"] = tokens
 			_ = writeAuthDoc(authPath, auth)
@@ -696,7 +713,7 @@ func extractAccountID(idToken, accessToken string) string {
 		if token == "" {
 			continue
 		}
-		claims, ok := parseJWTClaims(token)
+		claims, ok := util.ParseJWTClaims(token)
 		if !ok {
 			continue
 		}
@@ -717,4 +734,152 @@ func extractAccountID(idToken, accessToken string) string {
 		}
 	}
 	return ""
+}
+
+// --- subscription usage (ChatGPT/Codex usage endpoint, mirrors the Claude path) ---
+//
+// The ChatGPT backend exposes the account's rate-limit windows at /backend-api/
+// wham/usage (primary ≈ 5h, secondary ≈ weekly), the same data the Codex CLI shows.
+// We poll it on a TTL so the dashboard shows usage proactively without needing a
+// relay request first. Reads are async and never block Status().
+
+// usageSnapshot returns the cached usage windows, kicking off an async refresh
+// when stale. It never touches the network on the calling goroutine.
+func (c *CodexProvider) usageSnapshot() []UsageWindow {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	if !c.usageInFlight && time.Since(c.usageAt) >= codexUsageTTL {
+		c.usageInFlight = true
+		go c.refreshUsage()
+	}
+	return append([]UsageWindow(nil), c.usage...)
+}
+
+// refreshUsage fetches a fresh snapshot. It is the async refresh body but is also
+// safe to call synchronously. The snapshot is only replaced on success; the
+// timestamp always advances so a failing endpoint is retried at most once per TTL.
+func (c *CodexProvider) refreshUsage() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	windows, err := c.usageFetcher(ctx)
+
+	c.usageMu.Lock()
+	c.usageAt = time.Now()
+	c.usageInFlight = false
+	if err == nil && len(windows) > 0 {
+		c.usage = windows
+	}
+	c.usageMu.Unlock()
+
+	if err != nil {
+		log.Printf("Codex 用量查询失败: %v", err)
+	}
+}
+
+func (c *CodexProvider) fetchUsage(ctx context.Context) ([]UsageWindow, error) {
+	token, accountID, err := codexUsageCreds()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexUsageURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	if accountID != "" {
+		req.Header.Set("ChatGPT-Account-Id", accountID)
+	}
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Referer", "https://chatgpt.com/")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("usage HTTP %d: %s", resp.StatusCode, util.Truncate(string(body), 300))
+	}
+	windows, ok := parseCodexUsage(body)
+	if !ok {
+		return nil, errors.New("usage: unrecognized response shape")
+	}
+	return windows, nil
+}
+
+// codexUsageCreds reads the access token + account id from auth.json without
+// mutating it (refresh is left to the relay path; an expired token just 401s and
+// the dashboard degrades to no usage bars until the next real request).
+func codexUsageCreds() (token, accountID string, err error) {
+	authPath, err := codexAuthPath()
+	if err != nil {
+		return "", "", err
+	}
+	auth, err := readAuthDoc(authPath)
+	if err != nil {
+		return "", "", err
+	}
+	tokens, ok := util.GetMap(auth, "tokens")
+	if !ok {
+		return "", "", errors.New("no tokens object in auth.json")
+	}
+	token = util.GetString(tokens, "access_token")
+	if token == "" {
+		return "", "", errors.New("no access_token in auth.json")
+	}
+	accountID = util.GetString(tokens, "account_id")
+	if accountID == "" {
+		accountID = extractAccountID(util.GetString(tokens, "id_token"), token)
+	}
+	return token, accountID, nil
+}
+
+type codexUsageWindow struct {
+	UsedPercent float64 `json:"used_percent"`
+	ResetAt     int64   `json:"reset_at"`
+}
+
+// parseCodexUsage maps the wham/usage response into display windows. used_percent
+// is a 0..100 percentage; reset_at is a unix timestamp (seconds, sometimes ms).
+func parseCodexUsage(body []byte) ([]UsageWindow, bool) {
+	var doc struct {
+		RateLimit struct {
+			Primary   *codexUsageWindow `json:"primary_window"`
+			Secondary *codexUsageWindow `json:"secondary_window"`
+		} `json:"rate_limit"`
+	}
+	if json.Unmarshal(body, &doc) != nil {
+		return nil, false
+	}
+	out := make([]UsageWindow, 0, 2)
+	if w := doc.RateLimit.Primary; w != nil {
+		out = append(out, w.usageWindow("5 小时"))
+	}
+	if w := doc.RateLimit.Secondary; w != nil {
+		out = append(out, w.usageWindow("每周"))
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+func (w codexUsageWindow) usageWindow(label string) UsageWindow {
+	frac := w.UsedPercent / 100
+	if frac < 0 {
+		frac = 0
+	}
+	if frac > 1 {
+		frac = 1
+	}
+	reset := w.ResetAt
+	if reset > 1e11 { // milliseconds
+		reset /= 1000
+	}
+	if reset < 0 {
+		reset = 0
+	}
+	return UsageWindow{Label: label, Utilization: frac, ResetsAt: reset}
 }

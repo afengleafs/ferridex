@@ -1,4 +1,4 @@
-package main
+package server
 
 // LAN access helpers: detect this host's private IPv4 addresses, tell loopback
 // from LAN callers, and manage the auto-generated key that LAN clients must
@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+
+	"ferridex/internal/provider"
 )
 
 // portOf extracts the port from a listen address like "127.0.0.1:8788".
@@ -120,18 +122,21 @@ func lanGate(enabled bool, next http.Handler) http.Handler {
 	if !enabled {
 		return next
 	}
-	lanAllowed := map[string]bool{
-		"/v1/responses": true,
-		"/responses":    true,
-		"/v1/messages":  true,
-		"/messages":     true,
-		"/healthz":      true,
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isLoopbackRemote(r) && !lanAllowed[r.URL.Path] {
-			http.Error(w, "forbidden: local-only endpoint", http.StatusForbidden)
+		if isLoopbackRemote(r) {
+			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		path := r.URL.Path
+		switch path {
+		case "/v1/responses", "/responses", "/v1/messages", "/messages", "/healthz":
+			next.ServeHTTP(w, r)
+			return
+		}
+		if provider.IsCursorLANPath(path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "forbidden: local-only endpoint", http.StatusForbidden)
 	})
 }

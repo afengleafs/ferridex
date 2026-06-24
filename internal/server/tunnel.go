@@ -1,4 +1,4 @@
-package main
+package server
 
 // tunnelManager runs and supervises an `ssh -N -R` reverse tunnel as a child
 // process, so the dashboard can start/stop it. The forwarded port is ferridex's

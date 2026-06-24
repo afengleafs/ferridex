@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"encoding/json"
@@ -17,27 +17,15 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"ferridex/internal/provider"
+	"ferridex/internal/util"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 const autoPortSearchLimit = 100
-
-// Provider is one upstream subscription channel (Codex or Claude).
-type Provider interface {
-	Name() string
-	Relay(w http.ResponseWriter, r *http.Request)
-	Status() ProviderStatus
-}
-
-// ProviderStatus is what the dashboard shows for one provider.
-type ProviderStatus struct {
-	Name     string   `json:"name"`
-	Title    string   `json:"title"`
-	LoggedIn bool     `json:"logged_in"`
-	Account  string   `json:"account,omitempty"`
-	Detail   string   `json:"detail,omitempty"`
-	Models   []string `json:"models,omitempty"`
-	Endpoint string   `json:"endpoint"`
-}
 
 // --- config (optional downstream API key) ---
 
@@ -159,12 +147,19 @@ func logging(next http.Handler) http.Handler {
 			Dur:    time.Since(start).Round(time.Millisecond).String(),
 		}
 		log.Printf("%s %s -> %d (%s)", e.Method, e.Path, e.Status, e.Dur)
-		// only surface relay traffic in the live panel (not dashboard polling/assets)
-		switch r.URL.Path {
-		case "/v1/responses", "/responses", "/v1/messages", "/messages":
+		// Only surface relay traffic in the live panel (not dashboard polling/assets).
+		if isRelayLogPath(r.URL.Path) {
 			hub.add(e)
 		}
 	})
+}
+
+func isRelayLogPath(path string) bool {
+	switch path {
+	case "/v1/responses", "/responses", "/v1/messages", "/messages":
+		return true
+	}
+	return provider.IsCursorConnectPath(path)
 }
 
 func checkKey(r *http.Request, key string) bool {
@@ -179,11 +174,11 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func buildMux(dashboard, lan bool, lanKey string, tm *tunnelManager, providers ...Provider) *http.ServeMux {
+func buildMux(dashboard, lan bool, lanKey string, tm *tunnelManager, providers ...provider.Provider) http.Handler {
 	mux := http.NewServeMux()
 	cfg := loadConfig()
 
-	relay := func(p Provider) http.HandlerFunc {
+	relay := func(p provider.Provider) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if lan && !isLoopbackRemote(r) {
 				// LAN client: always require the auto-generated LAN key.
@@ -200,6 +195,7 @@ func buildMux(dashboard, lan bool, lanKey string, tm *tunnelManager, providers .
 		}
 	}
 
+	var cursorProvider provider.Provider
 	for _, p := range providers {
 		switch p.Name() {
 		case "codex":
@@ -208,6 +204,8 @@ func buildMux(dashboard, lan bool, lanKey string, tm *tunnelManager, providers .
 		case "claude":
 			mux.HandleFunc("POST /v1/messages", relay(p))
 			mux.HandleFunc("POST /messages", relay(p))
+		case "cursor":
+			cursorProvider = p
 		}
 	}
 
@@ -218,7 +216,7 @@ func buildMux(dashboard, lan bool, lanKey string, tm *tunnelManager, providers .
 	if dashboard {
 		ps := providers
 		mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-			sts := make([]ProviderStatus, 0, len(ps))
+			sts := make([]provider.ProviderStatus, 0, len(ps))
 			for _, p := range ps {
 				sts = append(sts, p.Status())
 			}
@@ -265,7 +263,22 @@ func buildMux(dashboard, lan bool, lanKey string, tm *tunnelManager, providers .
 		mux.HandleFunc("GET /api/logs/stream", logsStreamHandler)
 		mux.Handle("GET /", dashboardHandler())
 	}
+	if cursorProvider != nil {
+		cursorRelay := relay(cursorProvider)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if provider.IsCursorRelayPath(r) {
+				cursorRelay(w, r)
+				return
+			}
+			mux.ServeHTTP(w, r)
+		})
+	}
 	return mux
+}
+
+func serveHTTP(ln net.Listener, handler http.Handler) error {
+	h2s := &http2.Server{}
+	return http.Serve(ln, h2c.NewHandler(handler, h2s))
 }
 
 func logsStreamHandler(w http.ResponseWriter, r *http.Request) {
@@ -282,7 +295,7 @@ func logsStreamHandler(w http.ResponseWriter, r *http.Request) {
 	defer hub.unsubscribe(ch)
 
 	for _, e := range recent {
-		fmt.Fprintf(w, "data: %s\n\n", marshalJSONLine(e))
+		fmt.Fprintf(w, "data: %s\n\n", util.MarshalJSONLine(e))
 	}
 	flusher.Flush()
 
@@ -292,7 +305,7 @@ func logsStreamHandler(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case e := <-ch:
-			fmt.Fprintf(w, "data: %s\n\n", marshalJSONLine(e))
+			fmt.Fprintf(w, "data: %s\n\n", util.MarshalJSONLine(e))
 			flusher.Flush()
 		case <-time.After(20 * time.Second):
 			fmt.Fprint(w, ": ping\n\n")
@@ -303,7 +316,7 @@ func logsStreamHandler(w http.ResponseWriter, r *http.Request) {
 
 // --- subcommand runners ---
 
-func runServe(addr string, open, lan, newKey, autoPort bool, providers ...Provider) {
+func RunServe(addr string, open, lan, newKey, autoPort bool, providers ...provider.Provider) {
 	if newKey && !lan {
 		log.Printf("提示:-new-key 需配合 -lan 使用,本次忽略")
 	}
@@ -351,12 +364,13 @@ func runServe(addr string, open, lan, newKey, autoPort bool, providers ...Provid
 			log.Printf("  局域网 未检测到局域网 IPv4 地址")
 		}
 		for _, ip := range ips {
-			log.Printf("  局域网 http://%s:%s  (Codex/Claude 接口,需密钥)", ip, actualPort)
+			log.Printf("  局域网 http://%s:%s  (Codex/Claude/Cursor 接口,需密钥)", ip, actualPort)
 		}
 		log.Printf("  局域网密钥已写入面板「远程客户端配置」,复制给另一台电脑即可")
 	} else {
 		log.Printf("  Codex  POST http://%s/v1/responses", browserAddr)
 		log.Printf("  Claude POST http://%s/v1/messages", browserAddr)
+		log.Printf("  Cursor agent -e http://localhost:%s --auth-token dummy", actualPort)
 	}
 	logClaudeBreakerStatus(providers...)
 	if open {
@@ -365,12 +379,12 @@ func runServe(addr string, open, lan, newKey, autoPort bool, providers ...Provid
 			openBrowser(browserURL)
 		}()
 	}
-	if err := http.Serve(ln, logging(lanGate(lan, mux))); err != nil {
+	if err := serveHTTP(ln, logging(lanGate(lan, mux))); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func runSingle(addr string, autoPort bool, p Provider) {
+func RunSingle(addr string, autoPort bool, p provider.Provider) {
 	ln, err := listenWithAutoPort(addr, autoPort)
 	if err != nil {
 		log.Fatal(err)
@@ -385,9 +399,13 @@ func runSingle(addr string, autoPort bool, p Provider) {
 	}
 	browserAddr := browserAddrFor(addr, actualPort, false)
 	mux := buildMux(false, false, "", nil, p)
-	log.Printf("ferridex %s — POST http://%s%s", p.Name(), browserAddr, p.Status().Endpoint)
+	if p.Name() == "cursor" {
+		log.Printf("ferridex cursor — agent -e http://localhost:%s --auth-token dummy", actualPort)
+	} else {
+		log.Printf("ferridex %s — POST http://%s%s", p.Name(), browserAddr, p.Status().Endpoint)
+	}
 	logClaudeBreakerStatus(p)
-	if err := http.Serve(ln, logging(mux)); err != nil {
+	if err := serveHTTP(ln, logging(mux)); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -453,7 +471,7 @@ func browserAddrFor(addr, port string, lan bool) string {
 	return net.JoinHostPort(host, port)
 }
 
-func logClaudeBreakerStatus(providers ...Provider) {
+func logClaudeBreakerStatus(providers ...provider.Provider) {
 	for _, p := range providers {
 		if p.Name() == "claude" {
 			log.Printf("  Claude 限额熔断 已启用(官方 reset / 瞬态 5s)")
@@ -462,7 +480,7 @@ func logClaudeBreakerStatus(providers ...Provider) {
 	}
 }
 
-func printStatus(providers ...Provider) {
+func PrintStatus(providers ...provider.Provider) {
 	for _, p := range providers {
 		s := p.Status()
 		mark := "✗ 未登录"

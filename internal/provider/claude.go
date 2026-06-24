@@ -1,4 +1,4 @@
-package main
+package provider
 
 // ClaudeProvider relays to the Anthropic Messages API using the local Claude Code
 // subscription login. Anthropic gates plan-quota vs "third-party usage" on the
@@ -31,12 +31,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"ferridex/internal/util"
 )
 
 const (
 	claudeClientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	claudeTokenURL    = "https://platform.claude.com/v1/oauth/token"
 	claudeMessagesURL = "https://api.anthropic.com/v1/messages"
+	claudeUsageURL    = "https://api.anthropic.com/api/oauth/usage"
 	anthropicVersion  = "2023-06-01"
 	claudeCLIVersion  = "2.1.161"
 	claudeSystemID    = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -44,6 +47,11 @@ const (
 	claudeKeychainSvc = "Claude Code-credentials"
 
 	claudeTransientRateLimitCooldown = 5 * time.Second
+
+	// claudeUsageTTL bounds how often the dashboard hits the (undocumented) OAuth
+	// usage endpoint. /api/status is polled every 5s, so the snapshot is refreshed
+	// at most this often — well inside the rate limit sub2api documents (~3 min).
+	claudeUsageTTL = 90 * time.Second
 )
 
 // claudeMimicHeaders is the rest of the official Claude Code CLI request fingerprint.
@@ -112,6 +120,13 @@ type ClaudeProvider struct {
 	limitMu     sync.Mutex
 	limit       *claudeRateLimitState
 
+	// subscription usage snapshot for the dashboard (async, never blocks Status).
+	usageMu       sync.Mutex
+	usage         []UsageWindow
+	usageAt       time.Time
+	usageInFlight bool
+	usageFetcher  func(context.Context) ([]UsageWindow, error) // seam for tests
+
 	// stable per-process identifiers for metadata.user_id
 	uhash string // 64 hex
 	acct  string // uuid
@@ -119,13 +134,15 @@ type ClaudeProvider struct {
 }
 
 func NewClaudeProvider() *ClaudeProvider {
-	return &ClaudeProvider{
+	c := &ClaudeProvider{
 		client: &http.Client{Timeout: 10 * time.Minute},
 		now:    time.Now,
 		uhash:  randHex(32),
 		acct:   randUUID(),
 		sid:    randUUID(),
 	}
+	c.usageFetcher = c.fetchUsage
+	return c
 }
 
 func (c *ClaudeProvider) Name() string { return "claude" }
@@ -154,6 +171,9 @@ func (c *ClaudeProvider) Status() ProviderStatus {
 	}
 	if limit, ok := c.activeRateLimit(); ok {
 		st.Detail += fmt.Sprintf("; %s，恢复时间 %s", limit.label, limit.until.Local().Format("2006-01-02 15:04:05 MST"))
+	}
+	if st.LoggedIn {
+		st.Usage = c.usageSnapshot()
 	}
 	return st
 }
@@ -188,7 +208,7 @@ func (c *ClaudeProvider) Relay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
-	upstreamReq.Header.Set("Accept", firstNonEmpty(r.Header.Get("Accept"), "application/json"))
+	upstreamReq.Header.Set("Accept", util.FirstNonEmpty(r.Header.Get("Accept"), "application/json"))
 	upstreamReq.Header.Set("Authorization", "Bearer "+token)
 	upstreamReq.Header.Set("anthropic-version", anthropicVersion)
 	upstreamReq.Header.Set("anthropic-beta", mergeBetas(r.Header.Get("anthropic-beta")))
@@ -456,7 +476,7 @@ func (c *ClaudeProvider) patchClaudeBody(raw []byte) []byte {
 	if meta == nil {
 		meta = map[string]any{}
 	}
-	if getString(meta, "user_id") == "" {
+	if util.GetString(meta, "user_id") == "" {
 		meta["user_id"] = c.userID()
 	}
 	payload["metadata"] = meta
@@ -476,7 +496,7 @@ func claudeHasIdentity(blocks []any) bool {
 	if !ok {
 		return false
 	}
-	return getString(first, "text") == claudeSystemID
+	return util.GetString(first, "text") == claudeSystemID
 }
 
 func streamCopy(w http.ResponseWriter, src io.Reader) {
@@ -496,6 +516,161 @@ func streamCopy(w http.ResponseWriter, src io.Reader) {
 			return
 		}
 	}
+}
+
+// --- subscription usage (undocumented OAuth usage endpoint, mirrors sub2api) ---
+
+// usageSnapshot returns the cached usage windows, kicking off an async refresh
+// when the snapshot is stale. It never touches the network on the calling
+// goroutine so /api/status polling stays fast.
+func (c *ClaudeProvider) usageSnapshot() []UsageWindow {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	if !c.usageInFlight && c.nowTime().Sub(c.usageAt) >= claudeUsageTTL {
+		c.usageInFlight = true
+		go c.refreshUsage()
+	}
+	return append([]UsageWindow(nil), c.usage...)
+}
+
+// refreshUsage fetches a fresh usage snapshot. It is the body of the async
+// refresh goroutine but is also safe to call synchronously (tests do). The
+// snapshot is only replaced on success; the timestamp always advances so a
+// failing endpoint is retried at most once per TTL rather than every poll.
+func (c *ClaudeProvider) refreshUsage() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	windows, err := c.usageFetcher(ctx)
+
+	c.usageMu.Lock()
+	c.usageAt = c.nowTime()
+	c.usageInFlight = false
+	if err == nil && len(windows) > 0 {
+		c.usage = windows
+	}
+	c.usageMu.Unlock()
+
+	if err != nil {
+		log.Printf("Claude 用量查询失败: %v", err)
+	}
+}
+
+func (c *ClaudeProvider) fetchUsage(ctx context.Context) ([]UsageWindow, error) {
+	token, err := c.getAccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, claudeUsageURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("anthropic-version", anthropicVersion)
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	for k, v := range claudeMimicHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("usage HTTP %d: %s", resp.StatusCode, util.Truncate(string(body), 300))
+	}
+	windows, ok := parseClaudeUsage(body)
+	if !ok {
+		return nil, errors.New("usage: unrecognized response shape")
+	}
+	return windows, nil
+}
+
+// parseClaudeUsage maps the /api/oauth/usage response into display windows. The
+// endpoint is undocumented, so parse defensively: tolerate a 0..1 fraction or a
+// 0..100 percentage, and a reset given as an ISO-8601 string or a unix epoch.
+func parseClaudeUsage(body []byte) ([]UsageWindow, bool) {
+	var doc map[string]any
+	if json.Unmarshal(body, &doc) != nil {
+		return nil, false
+	}
+	windows := []struct{ key, label string }{
+		{"five_hour", "5 小时"},
+		{"seven_day", "7 天"},
+	}
+	out := make([]UsageWindow, 0, len(windows))
+	for _, w := range windows {
+		win, ok := util.GetMap(doc, w.key)
+		if !ok {
+			continue
+		}
+		util, ok := claudeUsageFraction(win["utilization"])
+		if !ok {
+			continue
+		}
+		out = append(out, UsageWindow{
+			Label:       w.label,
+			Utilization: util,
+			ResetsAt:    claudeUsageReset(win["resets_at"]),
+		})
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// claudeUsageFraction normalizes a utilization value to a 0..1 fraction.
+func claudeUsageFraction(v any) (float64, bool) {
+	f, ok := toFloat(v)
+	if !ok {
+		return 0, false
+	}
+	if f > 1 {
+		f /= 100
+	}
+	if f < 0 {
+		f = 0
+	}
+	if f > 1 {
+		f = 1
+	}
+	return f, true
+}
+
+// claudeUsageReset parses a reset marker into unix seconds (0 when unknown).
+func claudeUsageReset(v any) int64 {
+	switch t := v.(type) {
+	case string:
+		if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(t)); err == nil {
+			return ts.Unix()
+		}
+	case float64:
+		n := int64(t)
+		if n > 1e11 { // milliseconds
+			n /= 1000
+		}
+		if n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+func toFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		return f, err == nil
+	}
+	return 0, false
 }
 
 // --- token sourcing: ferridex cache -> local Claude Code login (file/Keychain) -> refresh ---
@@ -564,16 +739,16 @@ func parseClaudeOAuthJSON(b []byte) (access, refresh string, expiresAt int64, su
 	if json.Unmarshal(bytes.TrimSpace(b), &doc) != nil {
 		return
 	}
-	o, has := getMap(doc, "claudeAiOauth")
+	o, has := util.GetMap(doc, "claudeAiOauth")
 	if !has {
 		return
 	}
-	access = getString(o, "accessToken")
-	refresh = getString(o, "refreshToken")
+	access = util.GetString(o, "accessToken")
+	refresh = util.GetString(o, "refreshToken")
 	if v, k := o["expiresAt"].(float64); k {
 		expiresAt = int64(v)
 	}
-	subType = getString(o, "subscriptionType")
+	subType = util.GetString(o, "subscriptionType")
 	ok = access != ""
 	return
 }
@@ -638,7 +813,7 @@ func refreshClaudeToken(ctx context.Context, refreshToken string) (*claudeRefres
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("claude token refresh HTTP %d: %s", resp.StatusCode, truncate(string(rb), 500))
+		return nil, fmt.Errorf("claude token refresh HTTP %d: %s", resp.StatusCode, util.Truncate(string(rb), 500))
 	}
 	var out claudeRefreshResp
 	if err := json.Unmarshal(rb, &out); err != nil {

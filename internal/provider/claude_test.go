@@ -1,8 +1,9 @@
-package main
+package provider
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -42,6 +43,9 @@ func newTestClaudeProvider(clock *fakeClock, transport http.RoundTripper) *Claud
 	p.client = &http.Client{Transport: transport}
 	p.accessToken = func(context.Context) (string, error) { return "test-token", nil }
 	p.now = clock.Now
+	// Keep the dashboard usage fetch off the injected transport so call-count
+	// assertions stay deterministic; usage fetching is covered by its own tests.
+	p.usageFetcher = func(context.Context) ([]UsageWindow, error) { return nil, nil }
 	return p
 }
 
@@ -377,6 +381,82 @@ func TestClaudeRateLimitConcurrentReads(t *testing.T) {
 
 	if calls.Load() != 1 {
 		t.Fatalf("upstream calls = %d, want 1", calls.Load())
+	}
+}
+
+func TestParseClaudeUsage(t *testing.T) {
+	resetISO := "2026-06-18T18:00:00Z"
+	wantReset := time.Date(2026, time.June, 18, 18, 0, 0, 0, time.UTC).Unix()
+
+	t.Run("fraction with ISO reset", func(t *testing.T) {
+		body := []byte(`{"five_hour":{"utilization":0.5,"resets_at":"` + resetISO + `"},"seven_day":{"utilization":0.75,"resets_at":"` + resetISO + `"}}`)
+		got, ok := parseClaudeUsage(body)
+		if !ok || len(got) != 2 {
+			t.Fatalf("ok=%v len=%d", ok, len(got))
+		}
+		if got[0].Label != "5 小时" || got[0].Utilization != 0.5 || got[0].ResetsAt != wantReset {
+			t.Fatalf("window[0] = %+v", got[0])
+		}
+		if got[1].Label != "7 天" || got[1].Utilization != 0.75 {
+			t.Fatalf("window[1] = %+v", got[1])
+		}
+	})
+
+	t.Run("percentage normalized and clamped", func(t *testing.T) {
+		body := []byte(`{"five_hour":{"utilization":50},"seven_day":{"utilization":150}}`)
+		got, ok := parseClaudeUsage(body)
+		if !ok || len(got) != 2 {
+			t.Fatalf("ok=%v len=%d", ok, len(got))
+		}
+		if got[0].Utilization != 0.5 {
+			t.Fatalf("five_hour util = %v, want 0.5", got[0].Utilization)
+		}
+		if got[1].Utilization != 1 {
+			t.Fatalf("seven_day util = %v, want clamped 1", got[1].Utilization)
+		}
+	})
+
+	t.Run("epoch reset with one window", func(t *testing.T) {
+		body := []byte(`{"five_hour":{"utilization":0.25,"resets_at":1781000000}}`)
+		got, ok := parseClaudeUsage(body)
+		if !ok || len(got) != 1 {
+			t.Fatalf("ok=%v len=%d", ok, len(got))
+		}
+		if got[0].ResetsAt != 1781000000 {
+			t.Fatalf("reset = %d", got[0].ResetsAt)
+		}
+	})
+
+	t.Run("unrecognized shape", func(t *testing.T) {
+		for _, body := range []string{`not json`, `{}`, `{"five_hour":{}}`, `{"other":{"utilization":0.5}}`} {
+			if _, ok := parseClaudeUsage([]byte(body)); ok {
+				t.Fatalf("body %q unexpectedly parsed", body)
+			}
+		}
+	})
+}
+
+func TestClaudeUsageSnapshotRefresh(t *testing.T) {
+	clock := newFakeClock(time.Date(2026, time.June, 15, 10, 0, 0, 0, time.UTC))
+	p := NewClaudeProvider()
+	p.now = clock.Now
+
+	want := []UsageWindow{{Label: "5 小时", Utilization: 0.5, ResetsAt: 123}}
+	p.usageFetcher = func(context.Context) ([]UsageWindow, error) { return want, nil }
+
+	// refreshUsage stores the snapshot; with the fixed fake clock it stays fresh
+	// under the TTL, so usageSnapshot returns it without re-fetching.
+	p.refreshUsage()
+	got := p.usageSnapshot()
+	if len(got) != 1 || got[0].Label != "5 小时" || got[0].Utilization != 0.5 || got[0].ResetsAt != 123 {
+		t.Fatalf("snapshot = %+v", got)
+	}
+
+	// A failing fetch keeps the previous snapshot.
+	p.usageFetcher = func(context.Context) ([]UsageWindow, error) { return nil, errors.New("boom") }
+	p.refreshUsage()
+	if got := p.usageSnapshot(); len(got) != 1 || got[0].Label != "5 小时" {
+		t.Fatalf("snapshot after error = %+v", got)
 	}
 }
 
