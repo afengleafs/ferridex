@@ -146,11 +146,33 @@ wire_api = "responses"
 env_key = "LOCAL_PROXY_KEY"
 requires_openai_auth = false`;
 
+  // 一键启动命令:只内联「路由到 ferridex」必须的部分,不钉死模型/权限/推理档,
+  // 启动后就是登录后的默认模型界面(和 Cursor 的 `agent -e ...` 一致)。
+  const claudeLaunch = `ANTHROPIC_BASE_URL=${baseURL} ANTHROPIC_AUTH_TOKEN=${token} claude`;
+  const codexLaunch = [
+    `LOCAL_PROXY_KEY=${token} codex`,
+    `-c 'model_provider="localproxy"'`,
+    `-c 'model_providers.localproxy.base_url="${baseURL}/v1"'`,
+    `-c 'model_providers.localproxy.wire_api="responses"'`,
+    `-c 'model_providers.localproxy.env_key="LOCAL_PROXY_KEY"'`,
+    `-c 'model_providers.localproxy.requires_openai_auth=false'`,
+  ].join(" \\\n  ");
+
   $("#proxy-url").textContent = baseURL;
+  $("#claude-launch").textContent = claudeLaunch;
   $("#claude-config").textContent = JSON.stringify(claude, null, 2);
+  $("#codex-launch").textContent = codexLaunch;
   $("#codex-config").textContent = codex;
   $("#codex-env").textContent = `export LOCAL_PROXY_KEY=${token}`;
   $("#cursor-config").textContent = `agent -e ${cursorBaseURL()} --auth-token ${token}`;
+  // Grok 没有 -e/--auth-token,用环境变量指向代理。**不要用 XAI_API_KEY**:它会切到
+  // BYOK 模式直连 api.x.ai,绕过代理。改用 auth_provider_command 提供占位 token(grok
+  // 会当成会话令牌发给代理,ferridex 再替换成本机订阅 token)。独立 GROK_HOME 避免污染
+  // 本机真实的 ~/.grok 登录。LAN 下占位 token 即密钥。
+  // 先清隔离 home 的缓存,保证 grok 每次都用当前占位 token(dummy/密钥),
+  // 避免切换 SSH↔LAN 或换密钥后 grok 复用旧缓存 token 导致 401。
+  $("#grok-launch").textContent =
+    `rm -f $HOME/.grok-ferridex/auth.json; export GROK_HOME=$HOME/.grok-ferridex GROK_CLI_CHAT_PROXY_BASE_URL=${baseURL}/grok/v1 GROK_AUTH_PROVIDER_COMMAND='echo ${token}' GROK_AUTH_TOKEN_TTL=3600; grok`;
 }
 
 async function loadNetinfo() {
@@ -333,6 +355,9 @@ async function loadStatus() {
       .map((p) => {
         if (p.name === "cursor") {
           return `<div class="ep"><span class="name">${p.name}</span><code>agent -e ${cursorBaseURL()} --auth-token ${authToken()}</code></div>`;
+        }
+        if (p.name === "grok") {
+          return `<div class="ep"><span class="name">${p.name}</span><code>GROK_CLI_CHAT_PROXY_BASE_URL=${proxyBaseURL()}/grok/v1 (+ auth_provider_command)</code></div>`;
         }
         return `<div class="ep"><span class="name">${p.name}</span><code>POST ${location.origin}${p.endpoint}</code></div>`;
       })

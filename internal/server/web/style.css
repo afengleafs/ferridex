@@ -318,14 +318,33 @@ main {
   padding: 1px 5px;
 }
 
+/* 每个客户端一组：一键启动与默认配置并排独立 */
+.client-group {
+  margin-bottom: 22px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line-2);
+}
+.client-group:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+.client-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--ink);
+  margin-bottom: 10px;
+}
+
 .config-block {
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   overflow: hidden;
   background: var(--surface);
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
-.config-block:last-child { margin-bottom: 0; }
+.client-group .config-block:last-child { margin-bottom: 0; }
 .config-head {
   display: flex;
   align-items: center;
@@ -363,13 +382,14 @@ main {
   background: var(--surface-2);
 }
 .config-block.compact pre { max-height: none; }
+/* 一键启动等短命令块：无折叠，头部与内容自然分区 */
+.config-block.compact .config-head { border-bottom: 1px solid var(--line); }
 .accordion-head { cursor: pointer; user-select: none; }
 .config-block:not(.open) .accordion-head { border-bottom: none; }
 .config-body { display: none; }
 .config-block.open > .config-body { display: block; }
 .caret { display: inline-block; color: var(--faint); font-size: 11px; transition: transform 0.15s ease; }
 .config-block.open > .accordion-head .caret { transform: rotate(90deg); }
-.config-body .subblock { margin: 14px; }
 
 /* ===== SSH 隧道 ===== */
 .badge {

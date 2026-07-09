@@ -159,6 +159,9 @@ func isRelayLogPath(path string) bool {
 	case "/v1/responses", "/responses", "/v1/messages", "/messages":
 		return true
 	}
+	if provider.IsGrokPath(path) {
+		return true
+	}
 	return provider.IsCursorConnectPath(path)
 }
 
@@ -196,6 +199,7 @@ func buildMux(dashboard, lan bool, lanKey string, tm *tunnelManager, providers .
 	}
 
 	var cursorProvider provider.Provider
+	var grokProvider provider.Provider
 	for _, p := range providers {
 		switch p.Name() {
 		case "codex":
@@ -206,6 +210,8 @@ func buildMux(dashboard, lan bool, lanKey string, tm *tunnelManager, providers .
 			mux.HandleFunc("POST /messages", relay(p))
 		case "cursor":
 			cursorProvider = p
+		case "grok":
+			grokProvider = p
 		}
 	}
 
@@ -263,10 +269,20 @@ func buildMux(dashboard, lan bool, lanKey string, tm *tunnelManager, providers .
 		mux.HandleFunc("GET /api/logs/stream", logsStreamHandler)
 		mux.Handle("GET /", dashboardHandler())
 	}
-	if cursorProvider != nil {
-		cursorRelay := relay(cursorProvider)
+	if cursorProvider != nil || grokProvider != nil {
+		var cursorRelay, grokRelay http.HandlerFunc
+		if cursorProvider != nil {
+			cursorRelay = relay(cursorProvider)
+		}
+		if grokProvider != nil {
+			grokRelay = relay(grokProvider)
+		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if provider.IsCursorRelayPath(r) {
+			if grokRelay != nil && provider.IsGrokRelayPath(r) {
+				grokRelay(w, r)
+				return
+			}
+			if cursorRelay != nil && provider.IsCursorRelayPath(r) {
 				cursorRelay(w, r)
 				return
 			}
@@ -364,13 +380,14 @@ func RunServe(addr string, open, lan, newKey, autoPort bool, providers ...provid
 			log.Printf("  局域网 未检测到局域网 IPv4 地址")
 		}
 		for _, ip := range ips {
-			log.Printf("  局域网 http://%s:%s  (Codex/Claude/Cursor 接口,需密钥)", ip, actualPort)
+			log.Printf("  局域网 http://%s:%s  (Codex/Claude/Cursor/Grok 接口,需密钥)", ip, actualPort)
 		}
 		log.Printf("  局域网密钥已写入面板「远程客户端配置」,复制给另一台电脑即可")
 	} else {
 		log.Printf("  Codex  POST http://%s/v1/responses", browserAddr)
 		log.Printf("  Claude POST http://%s/v1/messages", browserAddr)
 		log.Printf("  Cursor agent -e http://localhost:%s --auth-token dummy", actualPort)
+		log.Printf("  Grok   export GROK_CLI_CHAT_PROXY_BASE_URL=http://%s/grok/v1", browserAddr)
 	}
 	logClaudeBreakerStatus(providers...)
 	if open {
@@ -399,9 +416,12 @@ func RunSingle(addr string, autoPort bool, p provider.Provider) {
 	}
 	browserAddr := browserAddrFor(addr, actualPort, false)
 	mux := buildMux(false, false, "", nil, p)
-	if p.Name() == "cursor" {
+	switch p.Name() {
+	case "cursor":
 		log.Printf("ferridex cursor — agent -e http://localhost:%s --auth-token dummy", actualPort)
-	} else {
+	case "grok":
+		log.Printf("ferridex grok — export GROK_CLI_CHAT_PROXY_BASE_URL=http://%s/grok/v1", browserAddr)
+	default:
 		log.Printf("ferridex %s — POST http://%s%s", p.Name(), browserAddr, p.Status().Endpoint)
 	}
 	logClaudeBreakerStatus(p)

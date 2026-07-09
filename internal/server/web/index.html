@@ -21,7 +21,7 @@
     <div class="brand">
       <span class="mark" aria-hidden="true"></span>
       <span class="wordmark">ferridex</span>
-      <span class="sub">Codex · Claude · Cursor 订阅本地代理</span>
+      <span class="sub">Codex · Claude · Cursor · Grok 订阅本地代理</span>
     </div>
     <button id="theme-toggle" class="ghost-btn theme-btn" aria-label="切换深色 / 浅色主题" aria-pressed="false" title="切换深色 / 浅色主题">
       <span class="ico-light">☀</span><span class="ico-dark">☾</span>
@@ -81,56 +81,110 @@
       </div>
       <div class="lan-info" id="lan-info"></div>
 
-      <div class="config-block open">
-        <div class="config-head accordion-head">
-          <div>
-            <span class="caret" aria-hidden="true">▸</span>
-            <strong>Claude Code</strong>
-            <span class="lang-tag">JSON</span>
-            <code>~/.claude/settings.json</code>
-          </div>
-          <button class="ghost-btn copy-btn" data-copy="claude-config" aria-label="复制 Claude Code 配置">一键复制</button>
-        </div>
-        <div class="config-body"><pre><code id="claude-config"></code></pre></div>
-      </div>
+      <!-- Claude Code：一键启动 / 默认配置 分开 -->
+      <div class="client-group">
+        <div class="client-label">Claude Code</div>
 
-      <div class="config-block open">
-        <div class="config-head accordion-head">
-          <div>
-            <span class="caret" aria-hidden="true">▸</span>
-            <strong>Codex</strong>
-            <span class="lang-tag">TOML</span>
-            <code>~/.codex/config.toml</code>
-          </div>
-          <button class="ghost-btn copy-btn" data-copy="codex-config" aria-label="复制 Codex 配置">一键复制</button>
-        </div>
-        <div class="config-body">
-          <pre><code id="codex-config"></code></pre>
-          <div class="config-block compact subblock">
-            <div class="config-head">
-              <div>
-                <strong>启动前执行</strong>
-                <span class="lang-tag">shell</span>
-                <span class="config-note">为 localproxy 提供占位凭据</span>
-              </div>
-              <button class="ghost-btn copy-btn" data-copy="codex-env" aria-label="复制启动环境变量">一键复制</button>
+        <div class="config-block compact">
+          <div class="config-head">
+            <div>
+              <strong>一键启动</strong>
+              <span class="lang-tag">shell</span>
+              <span class="config-note">无需写 settings.json，直接在远端启动</span>
             </div>
-            <pre><code id="codex-env"></code></pre>
+            <button class="ghost-btn copy-btn" data-copy="claude-launch" aria-label="复制 Claude 一键启动命令">一键复制</button>
           </div>
+          <pre><code id="claude-launch"></code></pre>
+        </div>
+
+        <div class="config-block open">
+          <div class="config-head accordion-head">
+            <div>
+              <span class="caret" aria-hidden="true">▸</span>
+              <strong>默认配置</strong>
+              <span class="lang-tag">JSON</span>
+              <code>~/.claude/settings.json</code>
+            </div>
+            <button class="ghost-btn copy-btn" data-copy="claude-config" aria-label="复制 Claude Code 配置">一键复制</button>
+          </div>
+          <div class="config-body"><pre><code id="claude-config"></code></pre></div>
         </div>
       </div>
 
-      <div class="config-block open">
-        <div class="config-head accordion-head">
-          <div>
-            <span class="caret" aria-hidden="true">▸</span>
-            <strong>Cursor CLI</strong>
-            <span class="lang-tag">shell</span>
-            <span class="config-note">远程 shell 启动前执行</span>
+      <!-- Codex：一键启动 / 默认配置 / 启动前执行 分开 -->
+      <div class="client-group">
+        <div class="client-label">Codex</div>
+
+        <div class="config-block compact">
+          <div class="config-head">
+            <div>
+              <strong>一键启动</strong>
+              <span class="lang-tag">shell</span>
+              <span class="config-note">无需写 config.toml，直接在远端启动</span>
+            </div>
+            <button class="ghost-btn copy-btn" data-copy="codex-launch" aria-label="复制 Codex 一键启动命令">一键复制</button>
           </div>
-          <button class="ghost-btn copy-btn" data-copy="cursor-config" aria-label="复制 Cursor CLI 配置">一键复制</button>
+          <pre><code id="codex-launch"></code></pre>
         </div>
-        <div class="config-body"><pre><code id="cursor-config"></code></pre></div>
+
+        <div class="config-block open">
+          <div class="config-head accordion-head">
+            <div>
+              <span class="caret" aria-hidden="true">▸</span>
+              <strong>默认配置</strong>
+              <span class="lang-tag">TOML</span>
+              <code>~/.codex/config.toml</code>
+            </div>
+            <button class="ghost-btn copy-btn" data-copy="codex-config" aria-label="复制 Codex 配置">一键复制</button>
+          </div>
+          <div class="config-body"><pre><code id="codex-config"></code></pre></div>
+        </div>
+
+        <div class="config-block compact">
+          <div class="config-head">
+            <div>
+              <strong>启动前执行</strong>
+              <span class="lang-tag">shell</span>
+              <span class="config-note">为 localproxy 提供占位凭据</span>
+            </div>
+            <button class="ghost-btn copy-btn" data-copy="codex-env" aria-label="复制启动环境变量">一键复制</button>
+          </div>
+          <pre><code id="codex-env"></code></pre>
+        </div>
+      </div>
+
+      <!-- Cursor CLI -->
+      <div class="client-group">
+        <div class="client-label">Cursor CLI</div>
+
+        <div class="config-block compact">
+          <div class="config-head">
+            <div>
+              <strong>一键启动</strong>
+              <span class="lang-tag">shell</span>
+              <span class="config-note">远程 shell 启动前执行</span>
+            </div>
+            <button class="ghost-btn copy-btn" data-copy="cursor-config" aria-label="复制 Cursor CLI 配置">一键复制</button>
+          </div>
+          <pre><code id="cursor-config"></code></pre>
+        </div>
+      </div>
+
+      <!-- Grok CLI -->
+      <div class="client-group">
+        <div class="client-label">Grok CLI</div>
+
+        <div class="config-block compact">
+          <div class="config-head">
+            <div>
+              <strong>一键启动</strong>
+              <span class="lang-tag">shell</span>
+              <span class="config-note">整条复制执行(勿用 XAI_API_KEY,会绕过代理)</span>
+            </div>
+            <button class="ghost-btn copy-btn" data-copy="grok-launch" aria-label="复制 Grok CLI 配置">一键复制</button>
+          </div>
+          <pre><code id="grok-launch"></code></pre>
+        </div>
       </div>
     </section>
 
