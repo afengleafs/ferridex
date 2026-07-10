@@ -87,6 +87,13 @@ function startAccordions() {
 
 /* ===== netinfo / 远程客户端配置 ===== */
 let netinfo = { lan_enabled: false, lan_ips: [], lan_key: "" };
+// 公网隧道状态 + 客户端配置目标（local | public）。选 public 时,下方命令指向 ngrok 公网地址。
+let pub = { running: false, url: "", key: "" };
+let clientTarget = "local";
+
+function publicActive() {
+  return clientTarget === "public" && pub.running && !!pub.url;
+}
 
 function currentPort() {
   return location.port || (location.protocol === "https:" ? "443" : "80");
@@ -98,16 +105,19 @@ function proxyHost() {
   return "127.0.0.1";
 }
 function proxyBaseURL() {
+  if (publicActive()) return pub.url; // 完整 https://xxx.ngrok-free.app,无端口
   return `http://${proxyHost()}:${currentPort()}`;
 }
 // Cursor CLI only routes agent traffic through a custom endpoint when the host
 // is "localhost" (127.0.0.1 bypasses the proxy and hits agentn.* directly).
 function cursorBaseURL(port) {
+  if (publicActive()) return pub.url;
   const host = proxyHost();
   const cursorHost = host === "127.0.0.1" ? "localhost" : host;
   return `http://${cursorHost}:${port || currentPort()}`;
 }
 function authToken() {
+  if (publicActive()) return pub.key || "dummy";
   return netinfo.lan_key || "dummy";
 }
 
@@ -152,6 +162,7 @@ requires_openai_auth = false`;
   const codexLaunch = [
     `LOCAL_PROXY_KEY=${token} codex`,
     `-c 'model_provider="localproxy"'`,
+    `-c 'model_providers.localproxy.name="Local Codex Proxy"'`,
     `-c 'model_providers.localproxy.base_url="${baseURL}/v1"'`,
     `-c 'model_providers.localproxy.wire_api="responses"'`,
     `-c 'model_providers.localproxy.env_key="LOCAL_PROXY_KEY"'`,
@@ -576,6 +587,73 @@ async function tunnelAction(path, body) {
   loadTunnel();
 }
 
+/* ===== 公网隧道 (ngrok) ===== */
+async function loadPublic() {
+  try {
+    const r = await fetch("/api/public");
+    const d = await r.json();
+    const st = d.status || {};
+    const panel = $("#public-panel");
+    const badge = $("#pub-badge");
+
+    pub = { running: !!st.running, url: st.url || "", key: d.key || "" };
+
+    panel.classList.toggle("is-running", pub.running);
+    panel.classList.toggle("is-error", !pub.running && !!st.last_error);
+
+    badge.className = "badge " + (pub.running ? "badge-on" : "badge-off");
+    badge.textContent = pub.running ? "运行中" : st.last_error ? "异常" : "未运行";
+
+    $("#pub-start").disabled = pub.running;
+    $("#pub-stop").disabled = !pub.running;
+
+    const urlRow = $("#pub-url-row");
+    if (pub.running && pub.url) {
+      $("#pub-url").textContent = pub.url;
+      urlRow.hidden = false;
+      const parts = [`<span class="pill">pid ${st.pid}</span>`, `<span class="pill">已运行 ${fmtUptime(st.uptime_sec)}</span>`];
+      $("#pub-info").innerHTML = parts.join("");
+    } else {
+      urlRow.hidden = true;
+      $("#pub-info").textContent = st.last_error ? "" : "未运行";
+    }
+    $("#pub-err").textContent = st.last_error || "";
+
+    // 只有隧道在跑时才提供「公网」目标切换;停掉后回退到本地并刷新命令。
+    const toggle = $("#target-toggle");
+    if (toggle) toggle.hidden = !pub.running;
+    if (!pub.running && clientTarget === "public") {
+      clientTarget = "local";
+      syncTargetToggle();
+    }
+    loadClientConfigs();
+  } catch (e) {}
+}
+
+function syncTargetToggle() {
+  $$("#target-toggle .seg-btn").forEach((b) =>
+    b.classList.toggle("active", b.dataset.target === clientTarget)
+  );
+}
+
+async function publicAction(path) {
+  $("#pub-info").textContent = "处理中…（首次建立隧道可能需要几秒）";
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const d = await r.json();
+    if (d.error) {
+      $("#pub-err").textContent = d.error;
+      toast("公网隧道操作失败", "err");
+    } else {
+      toast(path.endsWith("/start") ? "公网隧道已启动" : "公网隧道已停止");
+    }
+  } catch (e) {
+    $("#pub-err").textContent = String(e);
+    toast("公网隧道操作失败", "err");
+  }
+  loadPublic();
+}
+
 /* ===== 启动 ===== */
 initTheme();
 
@@ -583,6 +661,18 @@ $("#tun-start").addEventListener("click", () =>
   tunnelAction("/api/tunnel/start", { remote: $("#tun-remote").value, key: $("#tun-key").value })
 );
 $("#tun-stop").addEventListener("click", () => tunnelAction("/api/tunnel/stop", {}));
+
+$("#pub-start").addEventListener("click", () => publicAction("/api/public/start"));
+$("#pub-stop").addEventListener("click", () => publicAction("/api/public/stop"));
+
+// 客户端配置目标切换:本地/局域网 ↔ 公网(仅隧道运行时可见)。
+$("#target-toggle").addEventListener("click", (e) => {
+  const btn = e.target.closest(".seg-btn");
+  if (!btn) return;
+  clientTarget = btn.dataset.target === "public" ? "public" : "local";
+  syncTargetToggle();
+  loadClientConfigs();
+});
 
 // provider 卡片折叠:委托绑在常驻的 #cards 上,5 秒重渲染后依旧生效。
 $("#cards").addEventListener("click", (e) => {
@@ -603,8 +693,10 @@ startCopyButtons();
 startAccordions();
 loadStatus();
 loadTunnel();
+loadPublic();
 setInterval(() => {
   loadStatus();
   loadTunnel();
+  loadPublic();
 }, 5000);
 startLogs();

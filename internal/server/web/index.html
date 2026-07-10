@@ -55,6 +55,32 @@
       </div>
     </section>
 
+    <!-- 公网隧道 (ngrok) -->
+    <section class="block" id="public-panel">
+      <div class="eyebrow">
+        <span>Public · 公网隧道（ngrok）</span>
+        <span class="badge badge-off" id="pub-badge">未运行</span>
+      </div>
+      <div class="tunnel">
+        <div class="trow">
+          <button id="pub-start" class="solid-btn">启动</button>
+          <button id="pub-stop" class="ghost-btn">停止</button>
+          <span class="tinfo" id="pub-info"></span>
+        </div>
+        <div class="proxy-url-row" id="pub-url-row" hidden>
+          <span class="name">公网地址</span>
+          <code id="pub-url"></code>
+          <button class="ghost-btn copy-btn" data-copy="pub-url" aria-label="复制公网地址">复制</button>
+        </div>
+        <div class="lan-note">
+          需先安装 <code>ngrok</code>（macOS：<code>brew install ngrok</code>）并配置 authtoken：
+          <code>ngrok config add-authtoken &lt;token&gt;</code>（token 见 dashboard.ngrok.com）。
+          公网地址仅凭密钥保护，请勿泄露；面板本身不会对公网开放。
+        </div>
+        <div class="terr" id="pub-err"></div>
+      </div>
+    </section>
+
     <!-- provider 状态 -->
     <section class="block">
       <div class="eyebrow"><span>Providers · 状态</span></div>
@@ -72,6 +98,10 @@
       <div class="eyebrow">
         <span>Clients · 远程客户端配置</span>
         <span class="eyebrow-hint">复制到局域网 / SSH 主机</span>
+        <div class="seg target-toggle" id="target-toggle" role="group" aria-label="选择客户端连接目标" hidden>
+          <button class="seg-btn active" data-target="local">本地 / 局域网</button>
+          <button class="seg-btn" data-target="public">公网</button>
+        </div>
       </div>
 
       <div class="proxy-url-row">

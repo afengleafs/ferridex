@@ -177,14 +177,16 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func buildMux(dashboard, lan bool, lanKey string, tm *tunnelManager, providers ...provider.Provider) http.Handler {
+func buildMux(dashboard, lan bool, lanKey string, forceKey bool, tm *tunnelManager, ptm *publicTunnelManager, providers ...provider.Provider) http.Handler {
 	mux := http.NewServeMux()
 	cfg := loadConfig()
 
 	relay := func(p provider.Provider) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			if lan && !isLoopbackRemote(r) {
-				// LAN client: always require the auto-generated LAN key.
+			if forceKey || (lan && !isLoopbackRemote(r)) {
+				// Public relay listener (forceKey) always requires the key; a LAN
+				// client always requires the auto-generated LAN key. The public
+				// tunnel connects from loopback, so key enforcement can't rely on RemoteAddr.
 				if !checkKey(r, lanKey) {
 					http.Error(w, "invalid or missing API key", http.StatusUnauthorized)
 					return
@@ -260,6 +262,27 @@ func buildMux(dashboard, lan bool, lanKey string, tm *tunnelManager, providers .
 			mux.HandleFunc("POST /api/tunnel/stop", func(w http.ResponseWriter, r *http.Request) {
 				err := tm.Stop()
 				m := map[string]any{"ok": err == nil, "status": tm.Status()}
+				if err != nil {
+					m["error"] = err.Error()
+				}
+				writeJSON(w, m)
+			})
+		}
+		if ptm != nil {
+			mux.HandleFunc("GET /api/public", func(w http.ResponseWriter, r *http.Request) {
+				st := ptm.Status()
+				writeJSON(w, map[string]any{"status": st, "url": st.URL, "key": lanKey})
+			})
+			mux.HandleFunc("POST /api/public/start", func(w http.ResponseWriter, r *http.Request) {
+				if err := ptm.Start(); err != nil {
+					writeJSON(w, map[string]any{"ok": false, "error": err.Error(), "status": ptm.Status()})
+					return
+				}
+				writeJSON(w, map[string]any{"ok": true, "status": ptm.Status()})
+			})
+			mux.HandleFunc("POST /api/public/stop", func(w http.ResponseWriter, r *http.Request) {
+				err := ptm.Stop()
+				m := map[string]any{"ok": err == nil, "status": ptm.Status()}
 				if err != nil {
 					m["error"] = err.Error()
 				}
@@ -357,20 +380,41 @@ func RunServe(addr string, open, lan, newKey, autoPort bool, providers ...provid
 
 	browserAddr := browserAddrFor(addr, actualPort, lan)
 	browserURL := "http://" + browserAddr + "/"
-	lanKey := ""
-	if lan {
-		lanKey = ensureLANKey(newKey)
-	}
+	// A single downstream key guards both LAN clients and the public relay
+	// listener; ensure one exists even for a plain local serve so the panel's
+	// public tunnel can be toggled at runtime. -new-key only rotates under -lan.
+	lanKey := ensureLANKey(newKey && lan)
 
 	tm := newTunnelManager(net.JoinHostPort("127.0.0.1", actualPort))
+
+	// Dedicated loopback listener for public (tunnel) traffic: relay endpoints
+	// only (dashboard=false) with the key always required (forceKey=true).
+	// ngrok points here — never at the dashboard port — so the panel and
+	// /api/* stay structurally unreachable from the internet.
+	var ptm *publicTunnelManager
+	publicPort := ""
+	if publicLn := listenNextLoopback(actualPort); publicLn != nil {
+		publicPort = listenerPort(publicLn)
+		publicMux := buildMux(false, false, lanKey, true, nil, nil, providers...)
+		go func() {
+			if err := serveHTTP(publicLn, logging(publicMux)); err != nil {
+				log.Printf("公网中继监听退出: %v", err)
+			}
+		}()
+		ptm = newPublicTunnelManager(publicPort)
+	}
+
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigc
 		_ = tm.Stop()
+		if ptm != nil {
+			_ = ptm.Stop()
+		}
 		os.Exit(0)
 	}()
-	mux := buildMux(true, lan, lanKey, tm, providers...)
+	mux := buildMux(true, lan, lanKey, false, tm, ptm, providers...)
 
 	log.Printf("ferridex serve")
 	log.Printf("  面板   %s", browserURL)
@@ -388,6 +432,9 @@ func RunServe(addr string, open, lan, newKey, autoPort bool, providers ...provid
 		log.Printf("  Claude POST http://%s/v1/messages", browserAddr)
 		log.Printf("  Cursor agent -e http://localhost:%s --auth-token dummy", actualPort)
 		log.Printf("  Grok   export GROK_CLI_CHAT_PROXY_BASE_URL=http://%s/grok/v1", browserAddr)
+	}
+	if ptm != nil {
+		log.Printf("  公网   面板「公网隧道」一键起 ngrok(中继 127.0.0.1:%s,访问需密钥)", publicPort)
 	}
 	logClaudeBreakerStatus(providers...)
 	if open {
@@ -415,7 +462,7 @@ func RunSingle(addr string, autoPort bool, p provider.Provider) {
 		log.Printf("端口 %s 已被占用,已自动切换到 %s", requestedPort, actualPort)
 	}
 	browserAddr := browserAddrFor(addr, actualPort, false)
-	mux := buildMux(false, false, "", nil, p)
+	mux := buildMux(false, false, "", false, nil, nil, p)
 	switch p.Name() {
 	case "cursor":
 		log.Printf("ferridex cursor — agent -e http://localhost:%s --auth-token dummy", actualPort)
@@ -462,6 +509,25 @@ func listenWithAutoPort(addr string, autoPort bool) (net.Listener, error) {
 
 func isAddrInUse(err error) bool {
 	return errors.Is(err, syscall.EADDRINUSE) || strings.Contains(strings.ToLower(err.Error()), "address already in use")
+}
+
+// listenNextLoopback opens a loopback listener just above basePort (scanning
+// upward if taken), used for the dedicated public relay listener. Returns nil
+// (and logs) when none is available; the server still runs, just without the
+// panel's public tunnel option.
+func listenNextLoopback(basePort string) net.Listener {
+	n, err := strconv.Atoi(basePort)
+	if err != nil || n <= 0 || n >= 65535 {
+		log.Printf("公网中继监听端口计算失败(基准 %q),公网隧道不可用", basePort)
+		return nil
+	}
+	bind := net.JoinHostPort("127.0.0.1", strconv.Itoa(n+1))
+	ln, err := listenWithAutoPort(bind, true)
+	if err != nil {
+		log.Printf("公网中继监听启动失败,公网隧道不可用: %v", err)
+		return nil
+	}
+	return ln
 }
 
 func listenerPort(ln net.Listener) string {

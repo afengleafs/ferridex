@@ -30,6 +30,13 @@ const (
 	codexClientID     = "app_EMoamEEZ73f0CkXaXp7hrann"
 	codexRefreshSkew  = 30 * time.Second
 
+	// codexFallbackOriginator/Version impersonate a recent Codex CLI for
+	// downstream clients that don't identify themselves. The backend picks the
+	// available model table from originator + client version; without them it
+	// serves a legacy table and gpt-5.6-* returns 404 "Model not found".
+	codexFallbackOriginator = "codex_cli_rs"
+	codexFallbackVersion    = "0.144.1"
+
 	// codexUsageTTL bounds how often the dashboard polls the usage endpoint
 	// (same cadence as Claude; /api/status is polled every 5s).
 	codexUsageTTL = 90 * time.Second
@@ -63,7 +70,7 @@ func NewCodexProvider() *CodexProvider {
 func (c *CodexProvider) Name() string { return "codex" }
 
 func (c *CodexProvider) Status() ProviderStatus {
-	st := ProviderStatus{Name: "codex", Title: "ChatGPT · Codex", Endpoint: "/v1/responses", Models: []string{"gpt-5.5"}}
+	st := ProviderStatus{Name: "codex", Title: "ChatGPT · Codex", Endpoint: "/v1/responses", Models: []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"}}
 	path, err := codexAuthPath()
 	if err != nil {
 		st.Detail = "未找到 ~/.codex/auth.json(请先 codex login)"
@@ -122,6 +129,7 @@ func (c *CodexProvider) Relay(w http.ResponseWriter, r *http.Request) {
 	if accountID != "" {
 		upstreamReq.Header.Set("ChatGPT-Account-ID", accountID)
 	}
+	setCodexClientHeaders(r.Header, upstreamReq.Header)
 
 	upstreamResp, err := c.client.Do(upstreamReq)
 	if err != nil {
@@ -181,6 +189,25 @@ func requestWantsStream(raw []byte) bool {
 		return false
 	}
 	return payload.Stream
+}
+
+// setCodexClientHeaders forwards the downstream client's identity headers
+// upstream. The Codex backend needs originator plus a client version (the
+// `version` header or a codex_cli_rs User-Agent) to serve the current model
+// table; bare clients get impersonated as a recent Codex CLI so gpt-5.6-*
+// doesn't 404 with "Model not found".
+func setCodexClientHeaders(in, out http.Header) {
+	for _, k := range []string{"originator", "version", "session_id", "User-Agent", "OpenAI-Beta"} {
+		if v := in.Get(k); v != "" {
+			out.Set(k, v)
+		}
+	}
+	if out.Get("originator") == "" {
+		out.Set("originator", codexFallbackOriginator)
+	}
+	if out.Get("version") == "" {
+		out.Set("version", codexFallbackVersion)
+	}
 }
 
 func patchPayloadForCodex(raw []byte, defaultInstructions string, renameMap map[string]string) ([]byte, string) {
