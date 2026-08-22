@@ -58,21 +58,26 @@ func (l *lastLines) String() string {
 }
 
 type tunnelManager struct {
-	mu         sync.Mutex
-	addr       string // ferridex listen addr; the tunnel forwards this port
-	cmd        *exec.Cmd
-	errBuf     *lastLines
-	remote     string
-	remotePort string // remote listen port chosen for -R (may differ from local)
-	keyPath    string
-	startedAt  time.Time
-	lastErr    string
-	running    bool
-	starting   bool // a Start probe is in flight; lock is released during it
+	mu             sync.Mutex
+	addr           string // local relay-only addr targeted by the SSH forward
+	remoteBasePort string // preferred remote listen port shown to clients
+	cmd            *exec.Cmd
+	errBuf         *lastLines
+	remote         string
+	remotePort     string // remote listen port chosen for -R (may differ from local)
+	keyPath        string
+	startedAt      time.Time
+	lastErr        string
+	running        bool
+	starting       bool // a Start probe is in flight; lock is released during it
 }
 
-func newTunnelManager(addr string) *tunnelManager {
-	return &tunnelManager{addr: addr}
+func newTunnelManager(addr string, remoteBasePort ...string) *tunnelManager {
+	base := ""
+	if len(remoteBasePort) > 0 {
+		base = remoteBasePort[0]
+	}
+	return &tunnelManager{addr: addr, remoteBasePort: base}
 }
 
 func (t *tunnelManager) port() string {
@@ -80,6 +85,13 @@ func (t *tunnelManager) port() string {
 		return t.addr[i+1:]
 	}
 	return t.addr
+}
+
+func (t *tunnelManager) initialRemotePort() string {
+	if t.remoteBasePort != "" {
+		return t.remoteBasePort
+	}
+	return t.port()
 }
 
 // Start spawns `ssh -N -R 127.0.0.1:<rport>:127.0.0.1:<lport> ... <remote>`.
@@ -109,10 +121,11 @@ func (t *tunnelManager) Start(remote, keyPath string) error {
 		return fmt.Errorf("隧道正在启动中,请稍候")
 	}
 	localPort := t.port()
-	start, err := strconv.Atoi(localPort)
+	preferredRemotePort := t.initialRemotePort()
+	start, err := strconv.Atoi(preferredRemotePort)
 	if err != nil || start <= 0 || start > 65535 {
 		t.mu.Unlock()
-		return fmt.Errorf("无效的本地端口 %q", localPort)
+		return fmt.Errorf("无效的远端起始端口 %q", preferredRemotePort)
 	}
 	t.starting = true
 	t.mu.Unlock()
@@ -123,11 +136,17 @@ func (t *tunnelManager) Start(remote, keyPath string) error {
 		t.mu.Unlock()
 	}()
 
+	if local, err := strconv.Atoi(localPort); err != nil || local <= 0 || local > 65535 {
+		return fmt.Errorf("无效的本地中继端口 %q", localPort)
+	}
+
 	var lastMsg string
+	lastRemotePort := preferredRemotePort
 	tried := 0
 	for rport := start; rport <= start+tunnelRemotePortSearchLimit && rport <= 65535; rport++ {
 		tried++
 		rportStr := strconv.Itoa(rport)
+		lastRemotePort = rportStr
 		fwd := fmt.Sprintf("127.0.0.1:%s:127.0.0.1:%s", rportStr, localPort)
 		args := []string{
 			"-N",
@@ -145,7 +164,7 @@ func (t *tunnelManager) Start(remote, keyPath string) error {
 		cmd := exec.Command("ssh", args...)
 		cmd.Stderr = errBuf
 		if err := cmd.Start(); err != nil {
-			msg := explainTunnelError(err.Error(), localPort, remote, tried)
+			msg := explainTunnelError(err.Error(), rportStr, remote, tried)
 			t.setLastErr(msg)
 			return err
 		}
@@ -179,7 +198,7 @@ func (t *tunnelManager) Start(remote, keyPath string) error {
 			t.running = true
 			t.lastErr = ""
 			t.mu.Unlock()
-			t.supervise(cmd, errBuf, done, localPort, remote)
+			t.supervise(cmd, errBuf, done, rportStr, remote)
 			return nil
 		}
 	}
@@ -187,7 +206,7 @@ func (t *tunnelManager) Start(remote, keyPath string) error {
 	if lastMsg == "" {
 		lastMsg = "remote port forwarding failed"
 	}
-	msg := explainTunnelError(lastMsg, localPort, remote, tried)
+	msg := explainTunnelError(lastMsg, lastRemotePort, remote, tried)
 	t.setLastErr(msg)
 	return fmt.Errorf("%s", msg)
 }
@@ -200,7 +219,7 @@ func (t *tunnelManager) setLastErr(msg string) {
 
 // supervise records why the tunnel eventually stopped. It reuses the Wait
 // result delivered on done (started in Start), so cmd.Wait() is never called twice.
-func (t *tunnelManager) supervise(cmd *exec.Cmd, errBuf *lastLines, done <-chan error, localPort, remote string) {
+func (t *tunnelManager) supervise(cmd *exec.Cmd, errBuf *lastLines, done <-chan error, remotePort, remote string) {
 	go func() {
 		err := <-done
 		t.mu.Lock()
@@ -210,9 +229,9 @@ func (t *tunnelManager) supervise(cmd *exec.Cmd, errBuf *lastLines, done <-chan 
 		}
 		t.running = false
 		if msg := errBuf.String(); msg != "" {
-			t.lastErr = explainTunnelError(msg, localPort, remote, 0)
+			t.lastErr = explainTunnelError(msg, remotePort, remote, 0)
 		} else if err != nil {
-			t.lastErr = explainTunnelError(err.Error(), localPort, remote, 0)
+			t.lastErr = explainTunnelError(err.Error(), remotePort, remote, 0)
 		}
 	}()
 }

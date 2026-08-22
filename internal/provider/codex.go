@@ -37,9 +37,6 @@ const (
 	codexFallbackOriginator = "codex_cli_rs"
 	codexFallbackVersion    = "0.144.1"
 
-	// codexUsageTTL bounds how often the dashboard polls the usage endpoint
-	// (same cadence as Claude; /api/status is polled every 5s).
-	codexUsageTTL = 90 * time.Second
 )
 
 var codexAuthMu sync.Mutex
@@ -49,12 +46,8 @@ type CodexProvider struct {
 	renameMap    map[string]string
 	client       *http.Client
 
-	// subscription usage snapshot for the dashboard (async, never blocks Status).
-	usageMu       sync.Mutex
-	usage         []UsageWindow
-	usageAt       time.Time
-	usageInFlight bool
-	usageFetcher  func(context.Context) ([]UsageWindow, error) // seam for tests
+	// on-demand subscription usage query (dashboard button); seam for tests.
+	usageFetcher func(context.Context) ([]UsageWindow, error)
 }
 
 func NewCodexProvider() *CodexProvider {
@@ -97,7 +90,6 @@ func (c *CodexProvider) Status() ProviderStatus {
 	st.LoggedIn = true
 	st.Account = acct
 	st.Detail = "ChatGPT 订阅"
-	st.Usage = c.usageSnapshot()
 	return st
 }
 
@@ -767,40 +759,11 @@ func extractAccountID(idToken, accessToken string) string {
 //
 // The ChatGPT backend exposes the account's rate-limit windows at /backend-api/
 // wham/usage (primary ≈ 5h, secondary ≈ weekly), the same data the Codex CLI shows.
-// We poll it on a TTL so the dashboard shows usage proactively without needing a
-// relay request first. Reads are async and never block Status().
 
-// usageSnapshot returns the cached usage windows, kicking off an async refresh
-// when stale. It never touches the network on the calling goroutine.
-func (c *CodexProvider) usageSnapshot() []UsageWindow {
-	c.usageMu.Lock()
-	defer c.usageMu.Unlock()
-	if !c.usageInFlight && time.Since(c.usageAt) >= codexUsageTTL {
-		c.usageInFlight = true
-		go c.refreshUsage()
-	}
-	return append([]UsageWindow(nil), c.usage...)
-}
-
-// refreshUsage fetches a fresh snapshot. It is the async refresh body but is also
-// safe to call synchronously. The snapshot is only replaced on success; the
-// timestamp always advances so a failing endpoint is retried at most once per TTL.
-func (c *CodexProvider) refreshUsage() {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	windows, err := c.usageFetcher(ctx)
-
-	c.usageMu.Lock()
-	c.usageAt = time.Now()
-	c.usageInFlight = false
-	if err == nil && len(windows) > 0 {
-		c.usage = windows
-	}
-	c.usageMu.Unlock()
-
-	if err != nil {
-		log.Printf("Codex 用量查询失败: %v", err)
-	}
+// QueryUsage fetches the usage windows on demand — only when the dashboard's
+// 查询用量 button is clicked for this provider; nothing is cached or polled.
+func (c *CodexProvider) QueryUsage(ctx context.Context) ([]UsageWindow, error) {
+	return c.usageFetcher(ctx)
 }
 
 func (c *CodexProvider) fetchUsage(ctx context.Context) ([]UsageWindow, error) {

@@ -2,7 +2,10 @@
 // (Codex, Claude, Cursor) and the shared contract the server routes against.
 package provider
 
-import "net/http"
+import (
+	"context"
+	"net/http"
+)
 
 // Provider is one upstream subscription channel (Codex, Claude or Cursor).
 type Provider interface {
@@ -11,16 +14,24 @@ type Provider interface {
 	Status() ProviderStatus
 }
 
-// ProviderStatus is what the dashboard shows for one provider.
+// UsageQuerier is implemented by providers whose subscription usage can be
+// fetched on demand from the dashboard's 查询用量 button (Codex, Claude).
+// Usage is never polled automatically — only an explicit query hits upstream.
+type UsageQuerier interface {
+	QueryUsage(ctx context.Context) ([]UsageWindow, error)
+}
+
+// ProviderStatus is what the dashboard shows for one provider. Usage windows
+// are deliberately absent: they are only returned by an explicit QueryUsage.
 type ProviderStatus struct {
-	Name     string        `json:"name"`
-	Title    string        `json:"title"`
-	LoggedIn bool          `json:"logged_in"`
-	Account  string        `json:"account,omitempty"`
-	Detail   string        `json:"detail,omitempty"`
-	Models   []string      `json:"models,omitempty"`
-	Endpoint string        `json:"endpoint"`
-	Usage    []UsageWindow `json:"usage,omitempty"`
+	Name          string   `json:"name"`
+	Title         string   `json:"title"`
+	LoggedIn      bool     `json:"logged_in"`
+	Account       string   `json:"account,omitempty"`
+	Detail        string   `json:"detail,omitempty"`
+	Models        []string `json:"models,omitempty"`
+	Endpoint      string   `json:"endpoint"`
+	SupportsUsage bool     `json:"supports_usage,omitempty"`
 }
 
 // UsageWindow is one subscription rate-limit window shown as a progress bar on

@@ -11,6 +11,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -25,6 +26,25 @@ var ngrokPublicURL = regexp.MustCompile(`https://[a-z0-9.-]+\.ngrok(?:-free)?\.(
 // publicTunnelStartTimeout bounds how long we wait for ngrok to publish a URL
 // before giving up and killing it. ngrok normally connects in a couple seconds.
 const publicTunnelStartTimeout = 20 * time.Second
+
+// lookupNgrok finds the ngrok binary via PATH, falling back to the Homebrew
+// install locations. GUI apps launched from Finder/Dock inherit launchd's
+// minimal PATH (no /opt/homebrew/bin), so PATH lookup alone fails inside the
+// desktop .app even when ngrok is installed.
+func lookupNgrok() (string, error) {
+	if bin, err := exec.LookPath("ngrok"); err == nil {
+		return bin, nil
+	}
+	for _, p := range []string{
+		"/opt/homebrew/bin/ngrok", // Homebrew on Apple Silicon
+		"/usr/local/bin/ngrok",    // Homebrew on Intel
+	} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("ngrok not found")
+}
 
 type publicTunnelStatus struct {
 	Running   bool   `json:"running"`
@@ -75,7 +95,7 @@ func (t *publicTunnelManager) Start() error {
 		t.mu.Unlock()
 	}()
 
-	bin, err := exec.LookPath("ngrok")
+	bin, err := lookupNgrok()
 	if err != nil {
 		msg := "未找到 ngrok。请先安装:macOS `brew install ngrok`,然后 `ngrok config add-authtoken <token>`(token 见 https://dashboard.ngrok.com)"
 		t.setLastErr(msg)

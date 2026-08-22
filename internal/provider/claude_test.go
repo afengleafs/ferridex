@@ -436,27 +436,24 @@ func TestParseClaudeUsage(t *testing.T) {
 	})
 }
 
-func TestClaudeUsageSnapshotRefresh(t *testing.T) {
-	clock := newFakeClock(time.Date(2026, time.June, 15, 10, 0, 0, 0, time.UTC))
+func TestClaudeUsageQuery(t *testing.T) {
 	p := NewClaudeProvider()
-	p.now = clock.Now
 
 	want := []UsageWindow{{Label: "5 小时", Utilization: 0.5, ResetsAt: 123}}
 	p.usageFetcher = func(context.Context) ([]UsageWindow, error) { return want, nil }
 
-	// refreshUsage stores the snapshot; with the fixed fake clock it stays fresh
-	// under the TTL, so usageSnapshot returns it without re-fetching.
-	p.refreshUsage()
-	got := p.usageSnapshot()
+	got, err := p.QueryUsage(context.Background())
+	if err != nil {
+		t.Fatalf("QueryUsage: %v", err)
+	}
 	if len(got) != 1 || got[0].Label != "5 小时" || got[0].Utilization != 0.5 || got[0].ResetsAt != 123 {
-		t.Fatalf("snapshot = %+v", got)
+		t.Fatalf("usage = %+v", got)
 	}
 
-	// A failing fetch keeps the previous snapshot.
+	// A failing query surfaces the fetch error.
 	p.usageFetcher = func(context.Context) ([]UsageWindow, error) { return nil, errors.New("boom") }
-	p.refreshUsage()
-	if got := p.usageSnapshot(); len(got) != 1 || got[0].Label != "5 小时" {
-		t.Fatalf("snapshot after error = %+v", got)
+	if _, err := p.QueryUsage(context.Background()); err == nil {
+		t.Fatal("QueryUsage should surface the fetch error")
 	}
 }
 

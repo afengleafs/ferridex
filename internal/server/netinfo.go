@@ -8,6 +8,7 @@ package server
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -96,24 +97,40 @@ func randomKey() string {
 // the two auth mechanisms stay consistent. When rotate is true, a fresh lan_key
 // is generated even if one already exists (the `-new-key` flag).
 func ensureLANKey(rotate bool) string {
-	cfg := loadConfig()
-	if cfg.DownstreamKey != "" {
-		if rotate {
-			log.Printf("已设置 downstream_key,优先生效;-new-key 对 lan_key 无效")
+	var key string
+	rotated := false
+	err := updateConfig(func(cfg *config) error {
+		if cfg.DownstreamKey != "" {
+			if rotate {
+				log.Printf("已设置 downstream_key,优先生效;-new-key 对 lan_key 无效")
+			}
+			key = cfg.DownstreamKey
+			return nil
 		}
-		return cfg.DownstreamKey
-	}
-	if cfg.LANKey != "" && !rotate {
-		return cfg.LANKey
-	}
-	cfg.LANKey = randomKey()
-	if err := saveConfig(cfg); err != nil {
+		if cfg.LANKey != "" && !rotate {
+			key = cfg.LANKey
+			return nil
+		}
+		key = randomKey()
+		if key == "" {
+			return fmt.Errorf("生成随机密钥失败")
+		}
+		cfg.LANKey = key
+		rotated = rotate
+		return nil
+	})
+	if err != nil {
 		log.Printf("无法保存局域网密钥到 %s: %v", configPath(), err)
+		// Never let an empty key reach the forced public listener: checkKey would
+		// otherwise be unable to distinguish it from a missing header.
+		if key == "" {
+			key = randomKey()
+		}
 	}
-	if rotate {
+	if rotated {
 		log.Printf("已重新生成局域网密钥")
 	}
-	return cfg.LANKey
+	return key
 }
 
 // lanGate, when enabled, lets only the relay + health endpoints be reached from

@@ -47,11 +47,6 @@ const (
 	claudeKeychainSvc = "Claude Code-credentials"
 
 	claudeTransientRateLimitCooldown = 5 * time.Second
-
-	// claudeUsageTTL bounds how often the dashboard hits the (undocumented) OAuth
-	// usage endpoint. /api/status is polled every 5s, so the snapshot is refreshed
-	// at most this often — well inside the rate limit sub2api documents (~3 min).
-	claudeUsageTTL = 90 * time.Second
 )
 
 // claudeMimicHeaders is the rest of the official Claude Code CLI request fingerprint.
@@ -120,12 +115,8 @@ type ClaudeProvider struct {
 	limitMu     sync.Mutex
 	limit       *claudeRateLimitState
 
-	// subscription usage snapshot for the dashboard (async, never blocks Status).
-	usageMu       sync.Mutex
-	usage         []UsageWindow
-	usageAt       time.Time
-	usageInFlight bool
-	usageFetcher  func(context.Context) ([]UsageWindow, error) // seam for tests
+	// on-demand subscription usage query (dashboard button); seam for tests.
+	usageFetcher func(context.Context) ([]UsageWindow, error)
 
 	// stable per-process identifiers for metadata.user_id
 	uhash string // 64 hex
@@ -171,9 +162,6 @@ func (c *ClaudeProvider) Status() ProviderStatus {
 	}
 	if limit, ok := c.activeRateLimit(); ok {
 		st.Detail += fmt.Sprintf("; %s，恢复时间 %s", limit.label, limit.until.Local().Format("2006-01-02 15:04:05 MST"))
-	}
-	if st.LoggedIn {
-		st.Usage = c.usageSnapshot()
 	}
 	return st
 }
@@ -520,39 +508,10 @@ func streamCopy(w http.ResponseWriter, src io.Reader) {
 
 // --- subscription usage (undocumented OAuth usage endpoint, mirrors sub2api) ---
 
-// usageSnapshot returns the cached usage windows, kicking off an async refresh
-// when the snapshot is stale. It never touches the network on the calling
-// goroutine so /api/status polling stays fast.
-func (c *ClaudeProvider) usageSnapshot() []UsageWindow {
-	c.usageMu.Lock()
-	defer c.usageMu.Unlock()
-	if !c.usageInFlight && c.nowTime().Sub(c.usageAt) >= claudeUsageTTL {
-		c.usageInFlight = true
-		go c.refreshUsage()
-	}
-	return append([]UsageWindow(nil), c.usage...)
-}
-
-// refreshUsage fetches a fresh usage snapshot. It is the body of the async
-// refresh goroutine but is also safe to call synchronously (tests do). The
-// snapshot is only replaced on success; the timestamp always advances so a
-// failing endpoint is retried at most once per TTL rather than every poll.
-func (c *ClaudeProvider) refreshUsage() {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	windows, err := c.usageFetcher(ctx)
-
-	c.usageMu.Lock()
-	c.usageAt = c.nowTime()
-	c.usageInFlight = false
-	if err == nil && len(windows) > 0 {
-		c.usage = windows
-	}
-	c.usageMu.Unlock()
-
-	if err != nil {
-		log.Printf("Claude 用量查询失败: %v", err)
-	}
+// QueryUsage fetches the usage windows on demand — only when the dashboard's
+// 查询用量 button is clicked for this provider; nothing is cached or polled.
+func (c *ClaudeProvider) QueryUsage(ctx context.Context) ([]UsageWindow, error) {
+	return c.usageFetcher(ctx)
 }
 
 func (c *ClaudeProvider) fetchUsage(ctx context.Context) ([]UsageWindow, error) {

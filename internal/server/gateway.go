@@ -1,16 +1,17 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -26,39 +27,6 @@ import (
 )
 
 const autoPortSearchLimit = 100
-
-// --- config (optional downstream API key) ---
-
-type config struct {
-	DownstreamKey string `json:"downstream_key"`
-	LANKey        string `json:"lan_key,omitempty"`
-	TunnelRemote  string `json:"tunnel_remote,omitempty"`
-	TunnelKey     string `json:"tunnel_key,omitempty"`
-}
-
-func configPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".ferridex", "config.json")
-}
-
-func loadConfig() config {
-	var c config
-	if b, err := os.ReadFile(configPath()); err == nil {
-		_ = json.Unmarshal(b, &c)
-	}
-	return c
-}
-
-func saveConfig(c config) error {
-	p := configPath()
-	_ = os.MkdirAll(filepath.Dir(p), 0o700)
-	b, _ := json.MarshalIndent(c, "", "  ")
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
-}
 
 // --- live request log hub (for the dashboard log stream) ---
 
@@ -154,6 +122,62 @@ func logging(next http.Handler) http.Handler {
 	})
 }
 
+// withCORS lets the same-origin dashboard and the local Tauri shell reach the
+// panel API, while rejecting arbitrary websites. A loopback listener alone is
+// not a CSRF boundary: browser pages can still send requests to localhost.
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !allowedPanelOrigin(origin, r) {
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func allowedPanelOrigin(origin string, r *http.Request) bool {
+	switch origin {
+	case "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost",
+		"http://localhost:1420", "http://127.0.0.1:1420":
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return false
+	}
+	if !strings.EqualFold(u.Host, r.Host) || !isLoopbackHost(r.Host) {
+		return false
+	}
+	wantScheme := "http"
+	if r.TLS != nil {
+		wantScheme = "https"
+	}
+	return u.Scheme == wantScheme
+}
+
+func isLoopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func isRelayLogPath(path string) bool {
 	switch path {
 	case "/v1/responses", "/responses", "/v1/messages", "/messages":
@@ -166,6 +190,9 @@ func isRelayLogPath(path string) bool {
 }
 
 func checkKey(r *http.Request, key string) bool {
+	if key == "" {
+		return false
+	}
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") && auth[7:] == key {
 		return true
 	}
@@ -177,7 +204,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func buildMux(dashboard, lan bool, lanKey string, forceKey bool, tm *tunnelManager, ptm *publicTunnelManager, providers ...provider.Provider) http.Handler {
+func buildMux(dashboard, lan bool, lanKey string, forceKey bool, tm *tunnelManager, ptm *publicTunnelManager, responses *responsesUpstreamManager, claude *claudeUpstreamManager, providers ...provider.Provider) http.Handler {
 	mux := http.NewServeMux()
 	cfg := loadConfig()
 
@@ -222,19 +249,58 @@ func buildMux(dashboard, lan bool, lanKey string, forceKey bool, tm *tunnelManag
 	})
 
 	if dashboard {
+		registerResponsesUpstreamAPI(mux, responses)
+		registerClaudeUpstreamAPI(mux, claude)
 		ps := providers
 		mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 			sts := make([]provider.ProviderStatus, 0, len(ps))
 			for _, p := range ps {
-				sts = append(sts, p.Status())
+				st := p.Status()
+				_, st.SupportsUsage = p.(provider.UsageQuerier)
+				if switched, ok := p.(*provider.ResponsesProvider); ok && switched.Snapshot().ActiveSource == provider.ResponsesSourceCustom {
+					st.SupportsUsage = false
+				}
+				// Usage windows come from the Anthropic OAuth endpoint; hide the
+				// button while a third-party Claude profile is active.
+				if claudeSwitch, ok := p.(*provider.ClaudeUpstreamProvider); ok && claudeSwitch.Snapshot().Active == provider.ClaudeUpstreamProfile {
+					st.SupportsUsage = false
+				}
+				sts = append(sts, st)
 			}
 			writeJSON(w, map[string]any{"providers": sts})
 		})
+		// On-demand subscription usage query (dashboard 查询用量 button); usage is
+		// never polled automatically, so upstream only sees explicit clicks.
+		mux.HandleFunc("POST /api/usage/{name}", func(w http.ResponseWriter, r *http.Request) {
+			name := r.PathValue("name")
+			for _, p := range ps {
+				if p.Name() != name {
+					continue
+				}
+				uq, ok := p.(provider.UsageQuerier)
+				if !ok {
+					writeJSON(w, map[string]any{"ok": false, "error": "该 provider 不支持用量查询"})
+					return
+				}
+				ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+				defer cancel()
+				windows, err := uq.QueryUsage(ctx)
+				if err != nil {
+					writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+					return
+				}
+				writeJSON(w, map[string]any{"ok": true, "usage": windows})
+				return
+			}
+			writeJSON(w, map[string]any{"ok": false, "error": "未知 provider: " + name})
+		})
 		mux.HandleFunc("GET /api/netinfo", func(w http.ResponseWriter, r *http.Request) {
-			info := map[string]any{"lan_enabled": lan}
+			// The local panel uses this downstream key in every generated client
+			// config. It is required by LAN, SSH and ngrok relay-only listeners and
+			// harmless on the unkeyed loopback route.
+			info := map[string]any{"lan_enabled": lan, "lan_key": lanKey}
 			if lan {
 				info["lan_ips"] = lanIPv4s()
-				info["lan_key"] = lanKey
 			}
 			writeJSON(w, info)
 		})
@@ -253,10 +319,14 @@ func buildMux(dashboard, lan bool, lanKey string, forceKey bool, tm *tunnelManag
 					writeJSON(w, map[string]any{"ok": false, "error": err.Error(), "status": tm.Status()})
 					return
 				}
-				cfg := loadConfig()
-				cfg.TunnelRemote = strings.TrimSpace(body.Remote)
-				cfg.TunnelKey = strings.TrimSpace(body.Key)
-				_ = saveConfig(cfg)
+				if err := updateConfig(func(cfg *config) error {
+					cfg.TunnelRemote = strings.TrimSpace(body.Remote)
+					cfg.TunnelKey = strings.TrimSpace(body.Key)
+					return nil
+				}); err != nil {
+					writeJSON(w, map[string]any{"ok": false, "error": "保存隧道配置失败: " + err.Error(), "status": tm.Status()})
+					return
+				}
 				writeJSON(w, map[string]any{"ok": true, "status": tm.Status()})
 			})
 			mux.HandleFunc("POST /api/tunnel/stop", func(w http.ResponseWriter, r *http.Request) {
@@ -356,6 +426,11 @@ func logsStreamHandler(w http.ResponseWriter, r *http.Request) {
 // --- subcommand runners ---
 
 func RunServe(addr string, open, lan, newKey, autoPort bool, providers ...provider.Provider) {
+	if !lan && !isLoopbackHost(addr) {
+		log.Fatalf("拒绝把面板裸露到非回环地址 %q;局域网请使用 -lan,公网请使用 SSH/ngrok 隧道", addr)
+	}
+	providers, responses := configureResponsesProviders(providers...)
+	providers, claudeUpstream := configureClaudeProviders(providers...)
 	if newKey && !lan {
 		log.Printf("提示:-new-key 需配合 -lan 使用,本次忽略")
 	}
@@ -384,23 +459,27 @@ func RunServe(addr string, open, lan, newKey, autoPort bool, providers ...provid
 	// listener; ensure one exists even for a plain local serve so the panel's
 	// public tunnel can be toggled at runtime. -new-key only rotates under -lan.
 	lanKey := ensureLANKey(newKey && lan)
+	if lanKey == "" {
+		_ = ln.Close()
+		log.Fatal("无法生成下游访问密钥,拒绝启动可能公开的中继监听")
+	}
 
-	tm := newTunnelManager(net.JoinHostPort("127.0.0.1", actualPort))
-
-	// Dedicated loopback listener for public (tunnel) traffic: relay endpoints
-	// only (dashboard=false) with the key always required (forceKey=true).
-	// ngrok points here — never at the dashboard port — so the panel and
-	// /api/* stay structurally unreachable from the internet.
+	// Dedicated loopback listener for remote traffic: relay endpoints only
+	// (dashboard=false) with the key always required (forceKey=true). Both SSH
+	// reverse forwarding and ngrok point here, never at the dashboard port, so
+	// the panel and /api/* stay structurally unreachable from remote machines.
+	var tm *tunnelManager
 	var ptm *publicTunnelManager
 	publicPort := ""
 	if publicLn := listenNextLoopback(actualPort); publicLn != nil {
 		publicPort = listenerPort(publicLn)
-		publicMux := buildMux(false, false, lanKey, true, nil, nil, providers...)
+		publicMux := buildMux(false, false, lanKey, true, nil, nil, nil, nil, providers...)
 		go func() {
 			if err := serveHTTP(publicLn, logging(publicMux)); err != nil {
-				log.Printf("公网中继监听退出: %v", err)
+				log.Printf("远程中继监听退出: %v", err)
 			}
 		}()
+		tm = newTunnelManager(net.JoinHostPort("127.0.0.1", publicPort), actualPort)
 		ptm = newPublicTunnelManager(publicPort)
 	}
 
@@ -408,13 +487,15 @@ func RunServe(addr string, open, lan, newKey, autoPort bool, providers ...provid
 	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigc
-		_ = tm.Stop()
+		if tm != nil {
+			_ = tm.Stop()
+		}
 		if ptm != nil {
 			_ = ptm.Stop()
 		}
 		os.Exit(0)
 	}()
-	mux := buildMux(true, lan, lanKey, false, tm, ptm, providers...)
+	mux := buildMux(true, lan, lanKey, false, tm, ptm, responses, claudeUpstream, providers...)
 
 	log.Printf("ferridex serve")
 	log.Printf("  面板   %s", browserURL)
@@ -434,6 +515,7 @@ func RunServe(addr string, open, lan, newKey, autoPort bool, providers ...provid
 		log.Printf("  Grok   export GROK_CLI_CHAT_PROXY_BASE_URL=http://%s/grok/v1", browserAddr)
 	}
 	if ptm != nil {
+		log.Printf("  SSH    面板启动反向隧道(中继 127.0.0.1:%s,仅 AI 接口,访问需密钥)", publicPort)
 		log.Printf("  公网   面板「公网隧道」一键起 ngrok(中继 127.0.0.1:%s,访问需密钥)", publicPort)
 	}
 	logClaudeBreakerStatus(providers...)
@@ -443,12 +525,18 @@ func RunServe(addr string, open, lan, newKey, autoPort bool, providers ...provid
 			openBrowser(browserURL)
 		}()
 	}
-	if err := serveHTTP(ln, logging(lanGate(lan, mux))); err != nil {
+	if err := serveHTTP(ln, logging(withCORS(lanGate(lan, mux)))); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func RunSingle(addr string, autoPort bool, p provider.Provider) {
+	if !isLoopbackHost(addr) {
+		log.Fatalf("拒绝把 %s 代理裸露到非回环地址 %q;请使用 ferridex serve -lan 或面板的 SSH/ngrok 隧道", p.Name(), addr)
+	}
+	configured, _ := configureResponsesProviders(p)
+	configured, _ = configureClaudeProviders(configured...)
+	p = configured[0]
 	ln, err := listenWithAutoPort(addr, autoPort)
 	if err != nil {
 		log.Fatal(err)
@@ -462,7 +550,7 @@ func RunSingle(addr string, autoPort bool, p provider.Provider) {
 		log.Printf("端口 %s 已被占用,已自动切换到 %s", requestedPort, actualPort)
 	}
 	browserAddr := browserAddrFor(addr, actualPort, false)
-	mux := buildMux(false, false, "", false, nil, nil, p)
+	mux := buildMux(false, false, "", false, nil, nil, nil, nil, p)
 	switch p.Name() {
 	case "cursor":
 		log.Printf("ferridex cursor — agent -e http://localhost:%s --auth-token dummy", actualPort)
@@ -512,19 +600,19 @@ func isAddrInUse(err error) bool {
 }
 
 // listenNextLoopback opens a loopback listener just above basePort (scanning
-// upward if taken), used for the dedicated public relay listener. Returns nil
-// (and logs) when none is available; the server still runs, just without the
-// panel's public tunnel option.
+// upward if taken), used for the dedicated SSH/ngrok relay listener. Returns
+// nil (and logs) when none is available; the server still runs, just without
+// the panel's remote tunnel options.
 func listenNextLoopback(basePort string) net.Listener {
 	n, err := strconv.Atoi(basePort)
 	if err != nil || n <= 0 || n >= 65535 {
-		log.Printf("公网中继监听端口计算失败(基准 %q),公网隧道不可用", basePort)
+		log.Printf("远程中继监听端口计算失败(基准 %q),SSH/ngrok 隧道不可用", basePort)
 		return nil
 	}
 	bind := net.JoinHostPort("127.0.0.1", strconv.Itoa(n+1))
 	ln, err := listenWithAutoPort(bind, true)
 	if err != nil {
-		log.Printf("公网中继监听启动失败,公网隧道不可用: %v", err)
+		log.Printf("远程中继监听启动失败,SSH/ngrok 隧道不可用: %v", err)
 		return nil
 	}
 	return ln
@@ -567,6 +655,8 @@ func logClaudeBreakerStatus(providers ...provider.Provider) {
 }
 
 func PrintStatus(providers ...provider.Provider) {
+	providers, _ = configureResponsesProviders(providers...)
+	providers, _ = configureClaudeProviders(providers...)
 	for _, p := range providers {
 		s := p.Status()
 		mark := "✗ 未登录"
