@@ -51,46 +51,22 @@ ferridex status
 The default listen address is `127.0.0.1:8788`. Dashboard: `http://127.0.0.1:8788/`.
 Addresses such as `-addr 0.0.0.0:...` are rejected; use `ferridex serve -lan` for LAN access.
 
-## Custom Responses upstream
+## Upstream suppliers
 
-The dashboard **Responses upstream** card hot-switches between two sources. Saving or switching does not require a ferridex restart:
+The dashboard's **Upstream** page uses cc-switch-style Claude / Codex tabs and full-width supplier cards. Both tabs hot-switch without restarting ferridex or changing client configuration:
 
-- **Local subscription (`subscription`)**: keep using the ChatGPT/Codex login on this machine.
-- **Custom upstream (`custom`)**: set a provider name, API root (Base URL), API key, and default model, then forward to an enterprise service that speaks the OpenAI Responses API.
+- **Claude** switches between the local Anthropic subscription and multiple Anthropic-compatible suppliers.
+- **Codex** switches between the local ChatGPT subscription and multiple OpenAI Responses-compatible suppliers.
+- Supplier definitions are read from two files in ferridex's **working directory**. A commented template is created on first start and permissions are forced to `0600`:
 
-Example: wiring an enterprise VOD endpoint in the dashboard:
+  | Client | Supplier file | Required keys |
+  | --- | --- | --- |
+  | Claude | `claude_provider.env` | `ANTHROPIC_BASE_URL` plus `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` |
+  | Codex | `codex_provider.env` | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_DEFAULT_MODEL` |
 
-```text
-Provider name:  VOD GPT
-Base URL:       https://text-aigc.vod-qcloud.com/v1
-API Key:        <VOD_API_TOKEN>
-Default model:  gpt-5.6-sol
-```
+The common grammar is `[supplier-name]` sections, one `KEY=VALUE` per line, with optional `export` prefixes, single/double quotes, and `#` comments. Add as many sections as needed, save the file, then click **Reload** in the corresponding dashboard tab.
 
-> If a real VOD token was ever pasted into chat, an issue, logs, or a git repo, revoke and rotate it on the enterprise side first, then paste the new token into the dashboard. Never record real tokens in docs or config samples.
-
-The real upstream API key is stored only in `~/.ferridex/config.json` on this machine (mode `0600`). It is never returned to the web UI and never written into client config. Codex still talks only to ferridex and sends ferridex's **downstream key** via `LOCAL_PROXY_KEY`. Do not set the enterprise upstream API key as `LOCAL_PROXY_KEY`:
-
-```toml
-model = "gpt-5.6-sol"
-model_provider = "ferridex"
-
-[model_providers.ferridex]
-name = "Ferridex Responses Proxy"
-base_url = "http://127.0.0.1:8788/v1"
-env_key = "LOCAL_PROXY_KEY"
-wire_api = "responses"
-```
-
-Loopback, LAN, SSH, and ngrok clients all follow the currently selected Responses upstream. Switching back to the local subscription does not require client-config changes. SSH and ngrok tunnels connect only to a dedicated relay-only port, require the ferridex downstream key, and never expose the dashboard or the real upstream key.
-
-Only one custom Responses upstream is supported. There is no multi-profile set, no automatic failover, and no protocol translation. There is also no bare public listen. For public access use the ngrok flow below; do not bind ferridex to `0.0.0.0`.
-
-## Claude upstream profiles
-
-The **Upstream** panel's Claude tab hot-switches, by clicking cards, between the **local Anthropic subscription** and multiple **custom Anthropic-compatible upstreams** (OpenRouter and similar gateways). The layout follows cc-switch: Claude / Codex tabs plus full-width provider cards. Local Claude Code needs no config change and no restart:
-
-- Profiles live in `ferridex-profiles.env` in ferridex's **working directory** (a commented template is created on first start; file mode `0600`). Grammar: `[profile-name]` sections, one `KEY=VALUE` per line, with optional `export` prefixes, single/double quotes, and `#` comments — you can paste Claude Code env syntax as-is:
+Claude example (`claude_provider.env`):
 
   ```ini
   [openrouter]
@@ -103,11 +79,23 @@ The **Upstream** panel's Claude tab hot-switches, by clicking cards, between the
   CLAUDE_CODE_SUBAGENT_MODEL="stealth/ox-alpha"
   ```
 
-- **Model mapping**: if the requested model name contains `opus` / `sonnet` / `haiku` (case-insensitive), it is rewritten to the matching profile field. Unmatched or unset tiers pass through unchanged; ferridex never silently remaps across tiers. `CLAUDE_CODE_SUBAGENT_MODEL` is a client-local variable: ferridex accepts it but does not consume it.
+Codex example (`codex_provider.env`):
+
+```ini
+[openrouter]
+OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+OPENAI_API_KEY="sk-or-v1-..."
+OPENAI_DEFAULT_MODEL="openai/gpt-5.6"
+```
+
+- **Claude model mapping**: if the requested model name contains `opus` / `sonnet` / `haiku` (case-insensitive), it is rewritten to the matching supplier field. Unmatched or unset tiers pass through unchanged; ferridex never silently remaps across tiers. `CLAUDE_CODE_SUBAGENT_MODEL` is a client-local variable: ferridex accepts it but does not consume it.
 - **Credentials**: `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer`; `ANTHROPIC_API_KEY` → `x-api-key` (Bearer wins when both are set). `BASE_URL` is the API root, with or without a trailing `/v1`; ferridex always forwards to `<root>/v1/messages`.
-- **Hot switch**: clicking a card takes effect immediately and is persisted to `~/.ferridex/config.json` (`claude_upstream`). It is restored on restart. After editing the file, click **Reload profiles**. If a selected profile is deleted, ferridex falls back to the local subscription and marks that in the panel; add the profile back and reload to restore it.
-- **Scope**: only `/v1/messages` (the Claude Code main path). OAuth refresh, quota breaker, and Claude Code fingerprint headers apply only in **local subscription** mode. Custom upstreams do not inject those headers; HTTP 429 is passed through.
-- **Security**: the profiles file holds real credentials, is gitignored, and must not be committed or shared. Management APIs return only configured/not-configured booleans and never echo credential values.
+- **Codex protocol**: suppliers must speak the OpenAI Responses API; ferridex forwards to `<OPENAI_BASE_URL>/responses` without translating another protocol. The Test button sends one minimal request and may incur a small charge.
+- **Hot switch**: clicking a card takes effect immediately. Only the selected supplier name is persisted in `~/.ferridex/config.json`; credentials remain in the supplier files. Claude falls back to its local subscription if a selected supplier disappears. Codex fails closed instead of silently consuming the local subscription; restore the section and reload to resume it.
+- **Scope**: Claude suppliers affect only `/v1/messages`; Codex suppliers affect only `/v1/responses`. Subscription-only OAuth refresh, usage lookup, quota breaker, and fingerprint behavior are not applied to custom suppliers.
+- **Migration and security**: on first start after upgrading, a non-empty legacy `ferridex-profiles.env` is copied to `claude_provider.env`; a legacy Codex custom upstream from `~/.ferridex/config.json` is copied to `codex_provider.env`. Legacy data is retained for rollback and a non-empty new file is never overwritten. All supplier files are gitignored. Management APIs expose only redacted status, never credential values.
+
+Codex clients still send ferridex's **downstream key** via `LOCAL_PROXY_KEY`; never use a supplier API key as `LOCAL_PROXY_KEY`. Loopback, LAN, SSH, and ngrok clients all follow the current card selection. SSH and ngrok expose only the keyed relay, not the dashboard or supplier credentials.
 
 ## Client setup
 

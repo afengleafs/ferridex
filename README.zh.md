@@ -51,57 +51,25 @@ ferridex status
 默认监听 `127.0.0.1:8788`，面板地址：`http://127.0.0.1:8788/`。
 程序会拒绝 `-addr 0.0.0.0:...` 等非回环地址；局域网请用 `ferridex serve -lan`。
 
-## Responses 自定义上游
+## 上游供应商
 
-网页面板的「Responses 上游」可以在两种来源之间热切换，保存或切换后无需重启 ferridex：
+网页「上游切换」使用仿 cc-switch 的 Claude / Codex 标签和全宽供应商卡片，无需重启 ferridex，
+也无需修改客户端配置：
 
-- **本机订阅（subscription）**：继续复用本机已登录的 ChatGPT/Codex 订阅。
-- **自定义上游（custom）**：填写 Provider 名称、API 根地址（Base URL）、API Key 和默认模型，
-  转发兼容 OpenAI Responses API 的企业服务。
+- **Claude**：在本机 Anthropic 订阅与多个 Anthropic 兼容供应商之间切换。
+- **Codex**：在本机 ChatGPT 订阅与多个 OpenAI Responses 兼容供应商之间切换。
+- 两类供应商分别读取 ferridex **运行目录**中的文件。首次启动会创建带注释的模板，并强制使用
+  `0600` 权限：
 
-例如接入企业 VOD 时，在面板中填写：
+  | 客户端 | 供应商文件 | 必填配置 |
+  | --- | --- | --- |
+  | Claude | `claude_provider.env` | `ANTHROPIC_BASE_URL`，以及 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` 之一 |
+  | Codex | `codex_provider.env` | `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_DEFAULT_MODEL` |
 
-```text
-Provider 名称: VOD GPT
-Base URL:       https://text-aigc.vod-qcloud.com/v1
-API Key:        <VOD_API_TOKEN>
-默认模型:       gpt-5.6-sol
-```
+两种文件都使用 `[供应商名]` 分段，段内每行一个 `KEY=VALUE`，支持 `export` 前缀、单/双引号和
+`#` 注释。可以建立任意多个分段；保存后点击对应标签上方的「重新加载」。
 
-> 如果真实 VOD Token 曾被粘贴到聊天、Issue、日志或版本库中，请先在企业平台吊销并轮换，
-> 再把新 Token 填入面板。文档和配置示例中不要记录真实 Token。
-
-真实上游 API Key 只保存在本机 `~/.ferridex/config.json`（文件权限 `0600`），不会返回给网页，
-也不会写进客户端配置。Codex 客户端仍然只连接 ferridex，并通过 `LOCAL_PROXY_KEY` 提交
-ferridex 的**下游密钥**；不要把企业上游 API Key 设置为 `LOCAL_PROXY_KEY`：
-
-```toml
-model = "gpt-5.6-sol"
-model_provider = "ferridex"
-
-[model_providers.ferridex]
-name = "Ferridex Responses Proxy"
-base_url = "http://127.0.0.1:8788/v1"
-env_key = "LOCAL_PROXY_KEY"
-wire_api = "responses"
-```
-
-本机、LAN、SSH 和 ngrok 接入都会跟随当前选中的 Responses 上游；切回本机订阅时客户端配置
-无需改动。SSH 与 ngrok 隧道都只连接专用的 relay-only 端口并强制校验 ferridex 下游密钥，
-不会暴露管理面板或真实上游 Key。
-
-当前只提供一个自定义 Responses 上游，不支持多 profile、自动故障转移或其他协议转换；也不提供
-裸公网监听。公网访问请使用下方的 ngrok 方案，不要把 ferridex 直接监听到 `0.0.0.0`。
-
-## Claude 上游档案
-
-网页「上游切换」面板的 Claude 页可以在**本机 Anthropic 订阅**与多个**自定义 Anthropic 兼容上游**
-（OpenRouter 等网关）之间点击卡片热切换（仿 cc-switch：Claude / Codex 标签页 + 全宽 provider 卡），
-本地 Claude Code 无需任何改动、无需重启：
-
-- 档案定义在 ferridex **运行目录**下的 `ferridex-profiles.env`（首次启动会自动生成带注释的
-  模板；文件权限 `0600`）。语法：`[档案名]` 分段，段内每行一个 `KEY=VALUE`，支持 `export`
-  前缀、单/双引号和 `#` 注释——可以直接粘贴 Claude Code 的环境变量写法：
+Claude 示例（`claude_provider.env`）：
 
   ```ini
   [openrouter]
@@ -114,19 +82,36 @@ wire_api = "responses"
   CLAUDE_CODE_SUBAGENT_MODEL="stealth/ox-alpha"
   ```
 
-- **模型映射**：请求模型名含 `opus` / `sonnet` / `haiku`（大小写不敏感）时改写为档案对应字段；
+Codex 示例（`codex_provider.env`）：
+
+```ini
+[openrouter]
+OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+OPENAI_API_KEY="sk-or-v1-..."
+OPENAI_DEFAULT_MODEL="openai/gpt-5.6"
+```
+
+- **Claude 模型映射**：请求模型名含 `opus` / `sonnet` / `haiku`（大小写不敏感）时改写为供应商对应字段；
   未命中或未配置的档位原样透传，不会跨档位静默改写。`CLAUDE_CODE_SUBAGENT_MODEL` 仅是
   客户端本地变量，ferridex 接受但不消费。
 - **凭据**：`ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer`；`ANTHROPIC_API_KEY` →
   `x-api-key`（两者都设时 Bearer 优先）。`BASE_URL` 填 API 根地址，结尾带不带 `/v1` 都可以，
   ferridex 统一转发到 `<根地址>/v1/messages`。
-- **热切换**：「上游切换」面板点击卡片即生效并持久化到 `~/.ferridex/config.json`
-  （`claude_upstream` 字段）；重启后自动恢复。编辑文件后点「重新加载档案」重新读取；档案被删掉时
-  自动回退本机订阅并在面板标注，加回文件再点「重新加载」即可恢复。
-- **范围**：只影响 `/v1/messages`（Claude Code 主链路）；订阅路径的 OAuth 刷新、配额熔断、
-  Claude Code 指纹伪装仅在**本机订阅**模式下生效，自定义上游不注入这些头、429 直接透传。
-- **安全**：档案文件保存真实凭据，已被 `.gitignore` 忽略，请勿提交或分享；管理 API 只返回
-  「是否已配置」布尔位，永不回显凭据值。
+- **Codex 协议**：供应商必须支持 OpenAI Responses API；ferridex 转发到
+  `<OPENAI_BASE_URL>/responses`，不做其他协议转换。「测试」会发送一次最小请求，可能产生少量费用。
+- **热切换**：点击卡片立即生效，`~/.ferridex/config.json` 只记录所选供应商名称，凭据仍留在供应商
+  文件里。Claude 所选供应商消失时回退本机订阅；Codex 则关闭路由，避免静默消耗本机订阅，恢复
+  对应分段并重新加载后即可继续。
+- **范围**：Claude 供应商只影响 `/v1/messages`，Codex 供应商只影响 `/v1/responses`；OAuth 刷新、
+  用量查询、配额熔断和指纹逻辑等订阅专属能力不会用于自定义供应商。
+- **迁移与安全**：升级后首次启动会把非空的旧 `ferridex-profiles.env` 复制到
+  `claude_provider.env`；旧 Codex 自定义上游会从 `~/.ferridex/config.json` 复制到
+  `codex_provider.env`。旧数据保留用于回退，已有的非空新文件绝不会被覆盖。两个供应商文件均已被
+  `.gitignore` 忽略；管理 API 只返回脱敏状态，永不回显凭据值。
+
+Codex 客户端仍通过 `LOCAL_PROXY_KEY` 提交 ferridex 的**下游密钥**，不要把供应商 API Key 当作
+`LOCAL_PROXY_KEY`。本机、LAN、SSH 和 ngrok 都跟随当前卡片；SSH/ngrok 只暴露带密钥的转发接口，
+不会暴露管理面板或供应商凭据。
 
 ## 客户端接入
 

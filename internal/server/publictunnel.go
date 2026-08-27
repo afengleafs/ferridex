@@ -19,9 +19,10 @@ import (
 	"time"
 )
 
-// ngrokPublicURL matches the public address ngrok prints once the tunnel is up
-// (e.g. https://foo-bar-baz.ngrok-free.app, or .ngrok.app / .ngrok.io on paid).
-var ngrokPublicURL = regexp.MustCompile(`https://[a-z0-9.-]+\.ngrok(?:-free)?\.(?:app|io)`)
+// ngrokPublicURL matches the public address ngrok prints once the tunnel is up.
+// Free endpoints currently use *.ngrok-free.dev (older accounts used
+// *.ngrok-free.app); paid/legacy hosts include *.ngrok.app and *.ngrok.io.
+var ngrokPublicURL = regexp.MustCompile(`https://[a-z0-9.-]+\.ngrok(?:-free)?\.(?:app|io|dev)`)
 
 // publicTunnelStartTimeout bounds how long we wait for ngrok to publish a URL
 // before giving up and killing it. ngrok normally connects in a couple seconds.

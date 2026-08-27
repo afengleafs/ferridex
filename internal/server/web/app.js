@@ -11,6 +11,24 @@ function escapeHTML(value) {
   })[char]);
 }
 
+const BRAND_ICON_PATHS = {
+  claude: { src: "icons/claude.svg", mono: false },
+  codex: { src: "icons/openai.svg", mono: true },
+  grok: { src: "icons/grok.svg", mono: true },
+};
+
+const TERMINAL_ICON =
+  `<svg class="brand-icon utility-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-5-6-5"/><path d="M12 19h8"/></svg>`;
+
+// Provider 名称由本机后端给出；这里只允许映射到随二进制嵌入的固定资源。
+function brandIconHTML(name) {
+  const key = String(name || "").toLowerCase();
+  if (key === "cursor") return TERMINAL_ICON;
+  const icon = BRAND_ICON_PATHS[key];
+  if (!icon) return "";
+  return `<img class="brand-icon${icon.mono ? " brand-icon-mono" : ""}" src="${icon.src}" alt="" aria-hidden="true" />`;
+}
+
 /* ===== 主题切换 ===== */
 function initTheme() {
   const root = document.documentElement;
@@ -103,16 +121,17 @@ let pub = { running: false, url: "", key: "" };
 let clientTarget = "local";
 let responsesUpstream = {
   active_source: "subscription",
+  active: "",
+  stale_profile: "",
+  profiles: [],
   subscription: {},
-  custom: {
-    configured: false,
-    name: "Custom Responses",
-    base_url: "",
-    default_model: "gpt-5.6-sol",
-    has_api_key: false,
-  },
+  file: "",
+  file_error: "",
+  warnings: [],
 };
-// Claude 上游档案(ferridex-profiles.env):active 为 "" 表示本机 Anthropic 订阅。
+let codexUpstreamBusy = false;
+let codexTestBusy = "";
+// Claude 上游供应商(claude_provider.env):active 为 "" 表示本机 Anthropic 订阅。
 let claudeUpstream = {
   active: "",
   stale_profile: "",
@@ -142,7 +161,7 @@ function proxyHost() {
   return "127.0.0.1";
 }
 function proxyBaseURL() {
-  if (publicActive()) return pub.url; // 完整 https://xxx.ngrok-free.app,无端口
+  if (publicActive()) return pub.url; // 完整 https://xxx.ngrok-free.dev 等,无端口
   if (sshActive()) return `http://127.0.0.1:${sshTunnel.remote_port}`;
   return `http://${proxyHost()}:${currentPort()}`;
 }
@@ -172,7 +191,7 @@ function effectiveResponsesModel() {
   return "gpt-5.6-sol";
 }
 
-// 档案激活时,生成的 Claude settings.json 模型名跟随档案映射(服务端也会改写,
+// 供应商激活时,生成的 Claude settings.json 模型名跟随供应商映射(服务端也会改写,
 // 这里让客户端展示的配置与实际生效模型一致)。
 function effectiveClaudeModels() {
   const profile = activeClaudeProfile();
@@ -184,8 +203,8 @@ function effectiveClaudeModels() {
   };
 }
 
-// 档案激活且配置了模型映射时,给一键启动命令追加模型 env——这样 claude CLI
-// 的欢迎栏和 /model 列表会直接显示档案里的实际模型名(显示是客户端本地行为)。
+// 供应商激活且配置了模型映射时,给一键启动命令追加模型 env——这样 claude CLI
+// 的欢迎栏和 /model 列表会直接显示供应商里的实际模型名(显示是客户端本地行为)。
 function claudeModelEnvParts() {
   const profile = activeClaudeProfile();
   if (!profile) return [];
@@ -246,7 +265,7 @@ stream_idle_timeout_ms = 300000
 requires_openai_auth = false`;
 
   // 一键启动命令内联当前有效模型、Responses 路由和企业上游所需的稳定重试参数。
-  // 档案激活时带上模型 env,让 CLI 界面直接显示档案配置的实际模型。
+  // 供应商激活时带上模型 env,让 CLI 界面直接显示供应商配置的实际模型。
   const claudeLaunch = [...claudeModelEnvParts(), `ANTHROPIC_BASE_URL=${baseURL}`, `ANTHROPIC_AUTH_TOKEN=${token}`, "claude"].join(" ");
   const codexLaunch = [
     `LOCAL_PROXY_KEY=${shellSingleQuote(token)} codex`,
@@ -338,40 +357,51 @@ function setHubTab(tab) {
     const on = btn.dataset.hubTab === hubTab;
     btn.classList.toggle("active", on);
     btn.setAttribute("aria-selected", String(on));
+    btn.tabIndex = on ? 0 : -1;
   });
   $$(".hub-pane").forEach((pane) => {
     pane.hidden = pane.dataset.hubPane !== hubTab;
   });
-  // 「重新加载档案」只对 Claude 档案有意义,跟随标签页显隐。
+  // 重新加载按钮只在支持文件供应商的 Claude/Codex 标签中显示。
   $("#claude-upstream-reload").hidden = hubTab !== "claude";
   $("#claude-upstream-status").hidden = hubTab !== "claude";
+  $("#codex-upstream-reload").hidden = hubTab !== "codex";
+  $("#codex-upstream-status").hidden = hubTab !== "codex";
   // 一键复制跟随子标签:复制当前客户端类型的一键启动命令。
   const copyBtn = $("#hub-copy-launch");
   if (copyBtn) copyBtn.textContent = HUB_COPY_LABELS[hubTab];
   try { localStorage.setItem("ferridex.hubTab", hubTab); } catch {}
 }
 
-/* ===== Responses 上游配置 ===== */
-let upstreamFormDirty = false;
-let upstreamBusy = false;
+/* ===== Codex 上游供应商 ===== */
 
 function normalizeResponsesUpstream(data) {
   const raw = data && typeof data === "object" ? data : {};
-  const custom = raw.custom && typeof raw.custom === "object" ? raw.custom : {};
+  const profiles = Array.isArray(raw.profiles) ? raw.profiles : [];
   return {
     active_source: raw.active_source === "custom" ? "custom" : "subscription",
+    active: typeof raw.active === "string" ? raw.active : "",
+    stale_profile: typeof raw.stale_profile === "string" ? raw.stale_profile : "",
+    profiles: profiles.map((profile) => {
+      const item = profile && typeof profile === "object" ? profile : {};
+      return {
+        name: String(item.name || ""),
+        base_url: String(item.base_url || ""),
+        default_model: String(item.default_model || ""),
+        has_api_key: !!item.has_api_key,
+        valid: !!item.valid,
+        problems: Array.isArray(item.problems) ? item.problems.map(String) : [],
+        warnings: Array.isArray(item.warnings) ? item.warnings.map(String) : [],
+      };
+    }),
     subscription: raw.subscription == null ? {} : raw.subscription,
-    custom: {
-      configured: !!custom.configured,
-      name: String(custom.name || "Custom Responses"),
-      base_url: String(custom.base_url || ""),
-      default_model: String(custom.default_model || "gpt-5.6-sol"),
-      has_api_key: !!custom.has_api_key,
-    },
+    file: String(raw.file || ""),
+    file_error: String(raw.file_error || ""),
+    warnings: Array.isArray(raw.warnings) ? raw.warnings.map(String) : [],
   };
 }
 
-function subscriptionAvailable() {
+function responsesSubscriptionAvailable() {
   const subscription = responsesUpstream.subscription;
   if (typeof subscription === "boolean") return subscription;
   if (!subscription || typeof subscription !== "object") return true;
@@ -381,63 +411,76 @@ function subscriptionAvailable() {
 }
 
 function renderResponsesUpstream() {
-  const custom = responsesUpstream.custom || {};
-  const active = responsesUpstream.active_source;
-  const subscriptionOK = subscriptionAvailable();
-  const customConfigured = !!custom.configured;
+  const sources = $("#codex-upstream-sources");
+  if (!sources) return;
+  const active = responsesUpstream.active;
+  const subscriptionActive = responsesUpstream.active_source !== "custom";
+  const subscriptionOK = responsesSubscriptionAvailable();
+  const cards = [];
+  cards.push(
+    `<div class="upstream-source${subscriptionActive ? " active" : ""}">` +
+      `<span class="src-icon brand" aria-hidden="true">${brandIconHTML("codex")}</span>` +
+      `<div class="src-main">` +
+        `<div class="src-name-row"><strong>本机 ChatGPT 订阅</strong>` +
+        (subscriptionActive ? `<span class="pill-current">当前使用</span>` : "") +
+        `</div>` +
+        `<div class="src-url">chatgpt.com · OAuth 登录态</div>` +
+        `<p class="src-desc">继续使用本机 Codex 登录态，不需要额外 API Key。</p>` +
+      `</div>` +
+      `<div class="src-side"><span>${subscriptionActive ? "当前使用" : subscriptionOK ? "可切换" : "不可用"}</span>` +
+        `<button class="ghost-btn" type="button" data-codex-activate="" ${subscriptionActive || !subscriptionOK || codexUpstreamBusy ? "disabled" : ""}>启用</button>` +
+      `</div>` +
+    `</div>`
+  );
 
-  $("#upstream-source-subscription").classList.toggle("active", active === "subscription");
-  $("#upstream-source-custom").classList.toggle("active", active === "custom");
-  $("#upstream-custom-title").textContent = custom.name || "Custom Responses";
-  // cc-switch 风格:绿色「当前使用」药丸跟随激活态,自定义卡显示已存 Base URL。
-  $("#upstream-source-subscription .pill-current").hidden = active !== "subscription";
-  $("#upstream-source-custom .pill-current").hidden = active !== "custom";
-  const customURL = $("#upstream-custom-url");
-  customURL.textContent = custom.base_url || "";
-  customURL.hidden = !custom.base_url;
+  responsesUpstream.profiles.forEach((profile) => {
+    if (!profile.name) return;
+    const current = responsesUpstream.active_source === "custom" && active === profile.name;
+    const initial = escapeHTML((profile.name.trim()[0] || "?").toUpperCase());
+    const problems = [...(profile.problems || []), ...(profile.warnings || [])];
+    const problemHTML = problems.length
+      ? `<ul class="upstream-source-problems">${problems.map((message) => `<li>${escapeHTML(message)}</li>`).join("")}</ul>`
+      : "";
+    cards.push(
+      `<div class="upstream-source${current ? " active" : ""}${profile.valid ? "" : " invalid"}">` +
+        `<span class="src-icon soft" aria-hidden="true">${initial}</span>` +
+        `<div class="src-main">` +
+          `<div class="src-name-row"><strong>${escapeHTML(profile.name)}</strong>` +
+          (current ? `<span class="pill-current">当前使用</span>` : "") +
+          `</div>` +
+          (profile.base_url ? `<div class="src-url">${escapeHTML(profile.base_url)}</div>` : "") +
+          (profile.has_api_key ? `<div class="src-meta">API Key 已配置</div>` : "") +
+          (profile.default_model ? `<div class="upstream-tags"><span class="tag">${escapeHTML(profile.default_model)}</span></div>` : "") +
+          problemHTML +
+        `</div>` +
+        `<div class="src-side"><span>${!profile.valid ? "配置无效" : current ? "当前使用" : "可切换"}</span>` +
+          `<span class="source-actions">` +
+            `<button class="ghost-btn" type="button" data-codex-test="${escapeHTML(profile.name)}" ${!profile.valid || codexUpstreamBusy ? "disabled" : ""}>${codexTestBusy === profile.name ? "测试中…" : "测试"}</button>` +
+            `<button class="${current ? "ghost-btn" : "solid-btn"}" type="button" data-codex-activate="${escapeHTML(profile.name)}" ${!profile.valid || current || codexUpstreamBusy ? "disabled" : ""}>${current ? "当前使用" : "启用"}</button>` +
+          `</span>` +
+        `</div>` +
+      `</div>`
+    );
+  });
+  cards.push(
+    `<div class="upstream-source src-add">` +
+      `<span class="src-icon">+</span>` +
+      `<div class="src-main">` +
+        `<div class="src-name-row"><strong>新增供应商</strong></div>` +
+        `<div class="src-desc hint">在 codex_provider.env 里添加 <span class="tag">[供应商名]</span> 段并保存，然后点击上方「重新加载」。</div>` +
+      `</div>` +
+    `</div>`
+  );
+  sources.innerHTML = cards.join("");
+  $("#codex-upstream-reload").disabled = codexUpstreamBusy;
 
-  if (active === "subscription") {
-    $("#upstream-subscription-state").textContent = "当前使用";
-  } else {
-    $("#upstream-subscription-state").textContent = subscriptionOK ? "可切换" : "不可用";
-  }
-  if (active === "custom") {
-    $("#upstream-custom-state").textContent = "当前使用";
-  } else {
-    $("#upstream-custom-state").textContent = customConfigured ? "已配置" : "尚未配置";
-  }
-
-  $("#upstream-use-subscription").textContent = active === "subscription" ? "当前使用本机订阅" : "切换到本机订阅";
-  $("#upstream-activate").textContent = active === "custom" ? "当前使用自定义上游" : "启用自定义上游";
-
-  const controls = $$("#codex-pane button, #codex-pane input");
-  controls.forEach((control) => { control.disabled = upstreamBusy; });
-  if (!upstreamBusy) {
-    $("#upstream-use-subscription").disabled = active === "subscription" || !subscriptionOK;
-    $("#upstream-activate").disabled = active === "custom" || !customConfigured;
-    $("#upstream-test").disabled = !customConfigured;
-    $("#upstream-clear").disabled = !customConfigured;
-  }
-
+  const hints = [];
+  if (responsesUpstream.file) hints.push(`供应商文件：${responsesUpstream.file}。`);
+  if (responsesUpstream.stale_profile) hints.push(`已保存的供应商「${responsesUpstream.stale_profile}」不可用，Codex 路由保持关闭，不会回退本机订阅。`);
+  if (responsesUpstream.file_error) hints.push(`读取失败：${responsesUpstream.file_error}`);
+  if (responsesUpstream.warnings.length) hints.push(responsesUpstream.warnings.join("；"));
+  $("#codex-upstream-hint").textContent = hints.join(" ");
   loadClientConfigs();
-}
-
-function populateResponsesUpstreamForm(force) {
-  if (upstreamFormDirty && !force) return;
-  const custom = responsesUpstream.custom || {};
-  $("#upstream-name").value = custom.name || "Custom Responses";
-  $("#upstream-base-url").value = custom.base_url || "";
-  $("#upstream-model").value = custom.default_model || "gpt-5.6-sol";
-  $("#upstream-api-key").value = "";
-  $("#upstream-api-key").type = "password";
-  $("#upstream-key-toggle").textContent = "显示";
-  $("#upstream-key-toggle").setAttribute("aria-pressed", "false");
-  $("#upstream-key-toggle").setAttribute("aria-label", "显示本次输入的 API Key");
-  $("#upstream-api-key").placeholder = custom.has_api_key ? "留空则保留已保存的 API Key" : "首次保存时必填";
-  $("#upstream-key-state").textContent = custom.has_api_key
-    ? "API Key 已安全保存；留空会保留原值，页面不会回显。"
-    : "尚未保存 API Key；首次保存时必填。";
-  upstreamFormDirty = false;
 }
 
 function upstreamErrorMessage(data, fallback) {
@@ -460,100 +503,80 @@ async function upstreamRequest(path, options) {
   return data;
 }
 
-function setUpstreamError(message) {
-  $("#upstream-error").textContent = message || "";
+function setCodexUpstreamError(message) {
+  $("#codex-upstream-error").textContent = message || "";
 }
 
-function setUpstreamBusy(busy, message) {
-  upstreamBusy = busy;
-  $("#upstream-action-status").textContent = message || (!busy && upstreamFormDirty ? "有未保存的修改" : "");
-  renderResponsesUpstream();
-}
-
-async function loadResponsesUpstream(forceForm) {
+async function loadResponsesUpstream() {
   try {
     const data = await upstreamRequest("/api/responses-upstream");
     responsesUpstream = normalizeResponsesUpstream(data);
-    populateResponsesUpstreamForm(!!forceForm);
     renderResponsesUpstream();
-    setUpstreamError("");
+    setCodexUpstreamError("");
   } catch (error) {
-    setUpstreamError(error instanceof Error ? error.message : String(error));
+    setCodexUpstreamError(error instanceof Error ? error.message : String(error));
   }
 }
 
-async function activateResponsesSource(source) {
-  setUpstreamError("");
-  $("#upstream-test-result").textContent = "";
-  setUpstreamBusy(true, "正在切换…");
+async function activateResponsesSource(name) {
+  setCodexUpstreamError("");
+  codexUpstreamBusy = true;
+  $("#codex-upstream-status").textContent = "切换中…";
+  renderResponsesUpstream();
   try {
     await upstreamRequest("/api/responses-upstream/activate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source }),
+      body: JSON.stringify({ name }),
     });
-    await loadResponsesUpstream(false);
-    toast(source === "custom" ? "已启用自定义 Responses 上游" : "已切换到本机订阅");
+    await loadResponsesUpstream();
+    toast(name ? `已切换到 Codex 供应商「${name}」` : "已切换到本机 ChatGPT 订阅");
   } catch (error) {
-    setUpstreamError(error instanceof Error ? error.message : String(error));
-    toast("切换 Responses 上游失败", "err");
+    setCodexUpstreamError(error instanceof Error ? error.message : String(error));
+    toast("切换 Codex 供应商失败", "err");
   } finally {
-    setUpstreamBusy(false, "");
+    codexUpstreamBusy = false;
+    $("#codex-upstream-status").textContent = "";
+    renderResponsesUpstream();
   }
 }
 
-async function saveResponsesUpstream(event) {
-  event.preventDefault();
-  const form = $("#upstream-form");
-  if (!form.reportValidity()) return;
-
-  const apiKey = $("#upstream-api-key").value.trim();
-  if (!apiKey && !responsesUpstream.custom.has_api_key) {
-    setUpstreamError("首次保存自定义上游时必须填写 API Key。");
-    $("#upstream-api-key").focus();
-    return;
-  }
-
-  const payload = {
-    name: $("#upstream-name").value.trim(),
-    base_url: $("#upstream-base-url").value.trim(),
-    default_model: $("#upstream-model").value.trim(),
-  };
-  if (apiKey) payload.api_key = apiKey;
-
-  setUpstreamError("");
-  $("#upstream-test-result").textContent = "";
-  setUpstreamBusy(true, "正在保存…");
+async function reloadCodexProfiles() {
+  setCodexUpstreamError("");
+  codexUpstreamBusy = true;
+  $("#codex-upstream-status").textContent = "重新加载中…";
+  renderResponsesUpstream();
   try {
-    await upstreamRequest("/api/responses-upstream/save", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    upstreamFormDirty = false;
-    await loadResponsesUpstream(true);
-    toast("自定义 Responses 上游已保存");
-  } catch (error) {
-    setUpstreamError(error instanceof Error ? error.message : String(error));
-    toast("保存 Responses 上游失败", "err");
-  } finally {
-    setUpstreamBusy(false, "");
-  }
-}
-
-async function testResponsesUpstream() {
-  if (!window.confirm("测试会向已保存的上游发送一次最小 Responses 请求，可能产生少量费用。继续测试吗？")) return;
-  setUpstreamError("");
-  $("#upstream-test-result").textContent = "";
-  setUpstreamBusy(true, "正在测试连接…");
-  try {
-    const data = await upstreamRequest("/api/responses-upstream/test", {
+    await upstreamRequest("/api/responses-upstream/reload", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
     });
+    await loadResponsesUpstream();
+    toast("已重新加载 Codex 供应商");
+  } catch (error) {
+    setCodexUpstreamError(error instanceof Error ? error.message : String(error));
+    toast("重新加载 Codex 供应商失败", "err");
+  } finally {
+    codexUpstreamBusy = false;
+    $("#codex-upstream-status").textContent = "";
+    renderResponsesUpstream();
+  }
+}
+
+async function testResponsesUpstream(name) {
+  if (!window.confirm(`测试会向供应商「${name}」发送一次最小 Responses 请求，可能产生少量费用。确定要测试吗？`)) return;
+  setCodexUpstreamError("");
+  codexTestBusy = name;
+  renderResponsesUpstream();
+  try {
+    const data = await upstreamRequest("/api/responses-upstream/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
     if (data.ok === false || data.error) {
-      throw new Error(upstreamErrorMessage(data, "上游连接测试失败"));
+      throw new Error(upstreamErrorMessage(data, "连接测试失败"));
     }
     const details = [];
     const status = Number(data.status ?? data.status_code);
@@ -561,43 +584,18 @@ async function testResponsesUpstream() {
     if (Number.isFinite(status) && status > 0) details.push(`HTTP ${status}`);
     if (Number.isFinite(latency) && latency >= 0) details.push(`${Math.round(latency)} ms`);
     if (typeof data.message === "string" && data.message) details.unshift(data.message);
-    $("#upstream-test-result").textContent = details.length ? details.join(" · ") : "连接成功";
-    toast("Responses 上游连接成功");
+    toast(`${name}：${details.length ? details.join(" · ") : "连接成功"}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    $("#upstream-test-result").textContent = `测试失败：${message}`;
-    toast("Responses 上游连接测试失败", "err");
+    setCodexUpstreamError(`测试失败：${message}`);
+    toast(`${name} 连接测试失败`, "err");
   } finally {
-    setUpstreamBusy(false, "");
+    codexTestBusy = "";
+    renderResponsesUpstream();
   }
 }
 
-async function clearResponsesUpstream() {
-  if (!window.confirm("确定清除自定义 Responses 配置和已保存的 API Key 吗？清除后会切回本机订阅。")) return;
-  setUpstreamError("");
-  $("#upstream-test-result").textContent = "";
-  setUpstreamBusy(true, "正在清除…");
-  try {
-    await upstreamRequest("/api/responses-upstream/clear", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    upstreamFormDirty = false;
-    await loadResponsesUpstream(true);
-    toast("自定义 Responses 配置已清除");
-  } catch (error) {
-    setUpstreamError(error instanceof Error ? error.message : String(error));
-    toast("清除 Responses 配置失败", "err");
-  } finally {
-    setUpstreamBusy(false, "");
-  }
-}
-
-/* ===== Claude 上游档案 ===== */
-// 与标签页/静态卡共用的字形:六芒星 = Anthropic 订阅,六边形 = Codex/自定义。
-const GLYPH_ANTHROPIC =
-  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v16"/><path d="m5 8 14 8"/><path d="m19 8L5 16"/></svg>`;
+/* ===== Claude 上游供应商 ===== */
 
 function normalizeClaudeUpstream(data) {
   const raw = data && typeof data === "object" ? data : {};
@@ -635,11 +633,12 @@ function renderClaudeUpstream() {
   const active = claudeUpstream.active;
   const sub = claudeUpstream.subscription || {};
   const subOK = sub.available == null ? true : !!sub.available;
+  const subDisabled = active !== "" && !subOK;
 
   const cards = [];
   cards.push(
-    `<div class="upstream-source${active === "" ? " active" : ""}" data-claude-upstream="">` +
-      `<span class="src-icon grad" aria-hidden="true">${GLYPH_ANTHROPIC}</span>` +
+    `<div class="upstream-source${active === "" ? " active" : ""}" data-claude-upstream="" role="button" tabindex="0" aria-pressed="${active === ""}" aria-disabled="${subDisabled}">` +
+      `<span class="src-icon brand" aria-hidden="true">${brandIconHTML("claude")}</span>` +
       `<div class="src-main">` +
         `<div class="src-name-row"><strong>本机 Anthropic 订阅</strong>` +
         (active === "" ? `<span class="pill-current">当前使用</span>` : "") +
@@ -665,7 +664,7 @@ function renderClaudeUpstream() {
       ? `<ul class="upstream-source-problems">${problems.map((x) => `<li>${escapeHTML(x)}</li>`).join("")}</ul>`
       : "";
     cards.push(
-      `<div class="upstream-source${active === p.name ? " active" : ""}${p.valid ? "" : " invalid"}" data-claude-upstream="${escapeHTML(p.name)}">` +
+      `<div class="upstream-source${active === p.name ? " active" : ""}${p.valid ? "" : " invalid"}" data-claude-upstream="${escapeHTML(p.name)}" role="button" tabindex="0" aria-pressed="${active === p.name}" aria-disabled="${!p.valid}">` +
         `<span class="src-icon soft" aria-hidden="true">${initial}</span>` +
         `<div class="src-main">` +
           `<div class="src-name-row"><strong>${escapeHTML(p.name)}</strong>` +
@@ -678,17 +677,17 @@ function renderClaudeUpstream() {
           (tags.length ? `<div class="upstream-tags">${tags.join("")}</div>` : "") +
           problemHTML +
         `</div>` +
-        `<span class="src-side">${!p.valid ? "配置无效" : active === p.name ? "当前使用" : "点击切换"}</span>` +
+        `<span class="src-side">${!p.valid ? "配置无效" : active === p.name ? "当前使用" : "可切换"}</span>` +
       `</div>`
     );
   });
-  // 「新增档案」提示卡:非交互,告诉用户入口在档案文件里。
+  // 「新增供应商」提示卡:非交互,告诉用户入口在供应商文件里。
   cards.push(
-    `<div class="upstream-source src-add" aria-hidden="true">` +
+    `<div class="upstream-source src-add">` +
       `<span class="src-icon">+</span>` +
       `<div class="src-main">` +
-        `<div class="src-name-row"><strong>新增档案</strong></div>` +
-        `<div class="src-desc">在 ferridex-profiles.env 里添加 <span class="tag">[档案名]</span> 段并保存，然后点上方「重新加载档案」。</div>` +
+        `<div class="src-name-row"><strong>新增供应商</strong></div>` +
+        `<div class="src-desc hint">在 claude_provider.env 里添加 <span class="tag">[供应商名]</span> 段并保存，然后点击上方「重新加载」。</div>` +
       `</div>` +
     `</div>`
   );
@@ -696,13 +695,13 @@ function renderClaudeUpstream() {
 
   $("#claude-upstream-reload").disabled = claudeUpstreamBusy;
 
-  let hint = claudeUpstream.file ? `档案文件：${claudeUpstream.file}。` : "";
+  let hint = claudeUpstream.file ? `供应商文件：${claudeUpstream.file}。` : "";
   if (claudeUpstream.stale_profile) {
-    hint += ` 已保存的档案「${claudeUpstream.stale_profile}」不在文件中，当前已回退到本机订阅。`;
+    hint += ` 已保存的供应商「${claudeUpstream.stale_profile}」不在文件中，已自动回退到本机订阅。`;
   }
   $("#claude-upstream-hint").textContent = hint;
 
-  // 档案激活状态变化时,立即让「客户端配置」里的模型名跟随档案映射。
+  // 供应商激活状态变化时,立即让「客户端配置」里的模型名跟随供应商映射。
   loadClientConfigs();
 }
 
@@ -724,7 +723,7 @@ async function loadClaudeUpstream() {
 async function activateClaudeUpstream(name) {
   setClaudeUpstreamError("");
   claudeUpstreamBusy = true;
-  $("#claude-upstream-status").textContent = "正在切换…";
+  $("#claude-upstream-status").textContent = "切换中…";
   renderClaudeUpstream();
   try {
     await upstreamRequest("/api/claude-upstream/activate", {
@@ -733,7 +732,7 @@ async function activateClaudeUpstream(name) {
       body: JSON.stringify({ name }),
     });
     await loadClaudeUpstream();
-    toast(name ? `已切换到 Claude 档案「${name}」` : "已切换到本机 Anthropic 订阅");
+    toast(name ? `已切换到 Claude 供应商「${name}」` : "已切换到本机 Anthropic 订阅");
   } catch (error) {
     setClaudeUpstreamError(error instanceof Error ? error.message : String(error));
     toast("切换 Claude 上游失败", "err");
@@ -747,7 +746,7 @@ async function activateClaudeUpstream(name) {
 async function reloadClaudeProfiles() {
   setClaudeUpstreamError("");
   claudeUpstreamBusy = true;
-  $("#claude-upstream-status").textContent = "正在重新加载…";
+  $("#claude-upstream-status").textContent = "重新加载中…";
   renderClaudeUpstream();
   try {
     await upstreamRequest("/api/claude-upstream/reload", {
@@ -756,10 +755,10 @@ async function reloadClaudeProfiles() {
       body: "{}",
     });
     await loadClaudeUpstream();
-    toast("已重新加载 Claude 档案");
+    toast("已重新加载 Claude 供应商");
   } catch (error) {
     setClaudeUpstreamError(error instanceof Error ? error.message : String(error));
-    toast("重新加载 Claude 档案失败", "err");
+    toast("重新加载 Claude 供应商失败", "err");
   } finally {
     claudeUpstreamBusy = false;
     $("#claude-upstream-status").textContent = "";
@@ -779,10 +778,10 @@ function renderLanInfo() {
     el.innerHTML =
       `<div class="ep"><span class="name">局域网</span><code>${urls}</code></div>` +
       `<div class="ep"><span class="name">密钥</span><code>${escapeHTML(netinfo.lan_key)}</code></div>` +
-      `<div class="lan-note">同一 Wi-Fi 下的另一台电脑使用上面地址；下方配置已包含密钥，可直接复制粘贴。若对方连不上，多半是公司 Wi-Fi 的客户端隔离，请改用 SSH 反向隧道。</div>`;
+      `<div class="lan-note hint">同一 Wi-Fi 下的其他设备使用上面的地址；下方配置已包含密钥，可直接复制粘贴。若对方连不上，多半是公司 Wi-Fi 的客户端隔离，请改用 SSH 反向隧道。</div>`;
   } else {
     el.innerHTML =
-      `<div class="lan-note">本机模式：仅 127.0.0.1 可用。要让同一 Wi-Fi 的另一台电脑直连，请用 <code>ferridex serve -lan</code> 启动。</div>`;
+      `<div class="lan-note hint">当前为本机模式，仅 127.0.0.1 可用。要让同一 Wi-Fi 下的其他设备直连，请用 <code>ferridex serve -lan</code> 启动。</div>`;
   }
 }
 
@@ -903,13 +902,13 @@ function usagePopHTML(p, st) {
   } else if (st.usage && st.usage.length) {
     body = `<div class="usage">${st.usage.map(usageBar).join("")}</div>`;
   } else {
-    body = `<div class="usage-empty">未返回用量数据</div>`;
+    body = `<div class="usage-empty">暂无用量数据</div>`;
   }
   return `
     <div class="usage-pop">
       <div class="usage-pop-head">
         <strong>${escapeHTML(p.title || p.name)} · 用量</strong>
-        <button class="usage-close" data-usage-close="${escapeHTML(p.name)}" title="关闭">×</button>
+        <button class="usage-close" type="button" data-usage-close="${escapeHTML(p.name)}" aria-label="关闭用量面板">×</button>
       </div>
       ${body}
     </div>`;
@@ -959,33 +958,37 @@ function renderCards() {
           countdowns.push({ id: cardId, resetMs: claudeResetMs });
         }
         const collapsedClass = collapsedCards.has(p.name) ? " collapsed" : "";
+        const expanded = !collapsedCards.has(p.name);
         const st = usagePanels[p.name] || {};
         const usageBtn = p.supports_usage
-          ? `<button class="usage-btn${st.loading ? " loading" : ""}${st.open ? " active" : ""}" data-usage="${safeName}" title="查询用量" ${p.logged_in ? "" : "disabled"}>${st.loading ? usageLoaderSVG : usageChartSVG}</button>`
+          ? `<button class="usage-btn${st.loading ? " loading" : ""}${st.open ? " active" : ""}" type="button" data-usage="${safeName}" aria-label="查询 ${safeTitle} 用量" aria-pressed="${!!st.open}" ${p.logged_in ? "" : "disabled"}>${st.loading ? usageLoaderSVG : usageChartSVG}</button>`
           : "";
         return `
       <div class="card ${p.logged_in ? "" : "off"}${collapsedClass}" id="${escapeHTML(cardId)}">
         <div class="card-head">
-          <span class="caret" aria-hidden="true">▸</span>
-          <div class="card-head-main">
-            <h3>${safeTitle}</h3>
-            <span class="who">${safeName}</span>
-          </div>
-          <span class="card-head-status">
-            ${dot(p.logged_in)}
-            <strong>${p.logged_in ? "已登录" : "未登录"}</strong>
-          </span>
+          <button class="card-toggle" type="button" data-card-toggle="${safeName}" aria-expanded="${expanded}" aria-controls="${escapeHTML(cardId)}-body">
+            <span class="caret" aria-hidden="true">▸</span>
+            <span class="provider-brand" aria-hidden="true">${brandIconHTML(p.name)}</span>
+            <span class="card-head-main">
+              <span class="card-title">${safeTitle}</span>
+              <span class="who">${safeName}</span>
+            </span>
+            <span class="card-head-status">
+              ${dot(p.logged_in)}
+              <strong>${p.logged_in ? "已登录" : "未登录"}</strong>
+            </span>
+          </button>
           ${usageBtn}
         </div>
         ${st.open ? usagePopHTML(p, st) : ""}
-        <div class="card-body">
+        <div class="card-body" id="${escapeHTML(cardId)}-body">
           ${p.account ? `<div class="acct">${escapeHTML(p.account)}</div>` : ""}
           ${claudeCounting ? `<div class="detail"><span class="health-countdown"></span></div>` : (p.detail ? `<div class="detail">${escapeHTML(p.detail)}</div>` : "")}
           <div class="meta">${(p.models || []).map((m) => `<span class="tag">${escapeHTML(m)}</span>`).join("")}</div>
         </div>
       </div>`;
       })
-      .join("") || `<div class="empty">无 provider</div>`;
+      .join("") || `<div class="empty">还没有检测到 Provider</div>`;
 
   return claudeResetMs;
 }
@@ -1002,19 +1005,20 @@ async function loadStatus() {
 
     $("#endpoints").innerHTML = providers
       .map((p) => {
+        const providerName = `<span class="ep-name">${brandIconHTML(p.name)}<span class="name">${escapeHTML(p.name)}</span></span>`;
         if (p.name === "cursor") {
-          return `<div class="ep"><span class="name">${escapeHTML(p.name)}</span><code>agent -e ${escapeHTML(cursorBaseURL())} --auth-token ${escapeHTML(authToken())}</code></div>`;
+          return `<div class="ep">${providerName}<code>agent -e ${escapeHTML(cursorBaseURL())} --auth-token ${escapeHTML(authToken())}</code></div>`;
         }
         if (p.name === "grok") {
-          return `<div class="ep"><span class="name">${escapeHTML(p.name)}</span><code>GROK_CLI_CHAT_PROXY_BASE_URL=${escapeHTML(proxyBaseURL())}/grok/v1 (+ auth_provider_command)</code></div>`;
+          return `<div class="ep">${providerName}<code>GROK_CLI_CHAT_PROXY_BASE_URL=${escapeHTML(proxyBaseURL())}/grok/v1 (+ auth_provider_command)</code></div>`;
         }
-        return `<div class="ep"><span class="name">${escapeHTML(p.name)}</span><code>POST ${escapeHTML(location.origin)}${escapeHTML(p.endpoint)}</code></div>`;
+        return `<div class="ep">${providerName}<code>POST ${escapeHTML(location.origin)}${escapeHTML(p.endpoint)}</code></div>`;
       })
       .join("");
 
     // 整体健康
     if (!providers.length) {
-      setHealth("warn", "未检测到 provider");
+      setHealth("warn", "未检测到 Provider");
     } else {
       const onCount = providers.filter((p) => p.logged_in).length;
       if (onCount === providers.length) {
@@ -1146,7 +1150,7 @@ function startLogs() {
 
   // 清空
   $("#log-clear").addEventListener("click", () => {
-    box.innerHTML = `<div class="empty">已清空显示（后端缓冲不受影响）</div>`;
+    box.innerHTML = `<div class="empty">已清空显示，后端缓冲不受影响</div>`;
     applyFilter();
   });
 
@@ -1373,11 +1377,31 @@ function setConsoleTab(tab) {
     const on = btn.dataset.consoleTab === consoleTab;
     btn.classList.toggle("active", on);
     btn.setAttribute("aria-selected", String(on));
+    btn.tabIndex = on ? 0 : -1;
   });
   $$(".console-pane").forEach((pane) => {
     pane.hidden = pane.dataset.consolePane !== consoleTab;
   });
   try { localStorage.setItem("ferridex.consoleTab", consoleTab); } catch {}
+}
+
+function startTablistKeyboard(container, selector, dataKey, activate) {
+  container.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const tabs = Array.from(container.querySelectorAll(selector));
+    if (!tabs.length) return;
+    const current = tabs.indexOf(event.target.closest(selector));
+    if (current < 0) return;
+    event.preventDefault();
+    let next = current;
+    if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = tabs.length - 1;
+    else if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+    else next = (current - 1 + tabs.length) % tabs.length;
+    const button = tabs[next];
+    activate(button.dataset[dataKey]);
+    button.focus();
+  });
 }
 
 /* ===== 启动 ===== */
@@ -1394,51 +1418,48 @@ $(".hub-tabs").addEventListener("click", (e) => {
   const btn = e.target.closest(".hub-tab");
   if (btn) setHubTab(btn.dataset.hubTab);
 });
+startTablistKeyboard($(".console-tabs"), ".console-tab", "consoleTab", setConsoleTab);
+startTablistKeyboard($(".hub-tabs"), ".hub-tab", "hubTab", setHubTab);
 
 // 上游页快捷操作:一键复制(路由跟随公网状态) + 公网隧道就地启停。
 $("#hub-copy-launch").addEventListener("click", copyHubLaunch);
 $("#hub-public-toggle").addEventListener("click", toggleHubPublic);
-
-$("#upstream-form").addEventListener("submit", saveResponsesUpstream);
-$("#upstream-form").addEventListener("input", () => {
-  upstreamFormDirty = true;
-  $("#upstream-action-status").textContent = "有未保存的修改";
-});
-$("#upstream-use-subscription").addEventListener("click", () => activateResponsesSource("subscription"));
-$("#upstream-activate").addEventListener("click", () => activateResponsesSource("custom"));
-// Codex 行卡整卡可点(与 cc-switch 一致);卡内按钮有自己的直绑 handler,直接放行。
-$("#responses-cards").addEventListener("click", (e) => {
-  if (e.target.closest("button")) return;
-  const card = e.target.closest("[data-responses-source]");
-  if (!card || upstreamBusy) return;
-  activateResponsesSource(card.dataset.responsesSource);
-});
-$("#upstream-test").addEventListener("click", testResponsesUpstream);
-$("#upstream-clear").addEventListener("click", clearResponsesUpstream);
-$("#upstream-key-toggle").addEventListener("click", () => {
-  const input = $("#upstream-api-key");
-  const button = $("#upstream-key-toggle");
-  const reveal = input.type === "password";
-  input.type = reveal ? "text" : "password";
-  button.textContent = reveal ? "隐藏" : "显示";
-  button.setAttribute("aria-pressed", String(reveal));
-  button.setAttribute("aria-label", reveal ? "隐藏本次输入的 API Key" : "显示本次输入的 API Key");
-});
 
 $("#tun-start").addEventListener("click", () =>
   tunnelAction("/api/tunnel/start", { remote: $("#tun-remote").value, key: $("#tun-key").value })
 );
 $("#tun-stop").addEventListener("click", () => tunnelAction("/api/tunnel/stop", {}));
 
-// Claude 上游档案:委托绑在常驻容器上,5 秒重渲染后依旧生效;点击当前已激活
+// Claude 上游供应商:委托绑在常驻容器上,5 秒重渲染后依旧生效;点击当前已激活
 // 的卡片不重复发请求。
 $("#claude-upstream-reload").addEventListener("click", reloadClaudeProfiles);
-$("#claude-upstream-sources").addEventListener("click", (e) => {
-  const card = e.target.closest("[data-claude-upstream]");
-  if (!card || claudeUpstreamBusy) return;
+function activateClaudeCard(card) {
+  if (!card || claudeUpstreamBusy || card.getAttribute("aria-disabled") === "true") return;
   const name = card.dataset.claudeUpstream;
   if ((name || "") === (claudeUpstream.active || "")) return;
   activateClaudeUpstream(name);
+}
+$("#claude-upstream-sources").addEventListener("click", (e) => {
+  activateClaudeCard(e.target.closest("[data-claude-upstream]"));
+});
+$("#claude-upstream-sources").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const card = e.target.closest("[data-claude-upstream]");
+  if (!card) return;
+  e.preventDefault();
+  activateClaudeCard(card);
+});
+
+// Codex 使用显式按钮,避免在可点击卡片中嵌套「测试」按钮。
+$("#codex-upstream-reload").addEventListener("click", reloadCodexProfiles);
+$("#codex-upstream-sources").addEventListener("click", (event) => {
+  const testButton = event.target.closest("[data-codex-test]");
+  if (testButton) {
+    testResponsesUpstream(testButton.dataset.codexTest);
+    return;
+  }
+  const activateButton = event.target.closest("[data-codex-activate]");
+  if (activateButton) activateResponsesSource(activateButton.dataset.codexActivate);
 });
 
 $("#pub-start").addEventListener("click", () => publicAction("/api/public/start"));
@@ -1477,16 +1498,18 @@ $("#cards").addEventListener("click", (e) => {
     return;
   }
   if (e.target.closest(".usage-pop")) return; // 弹层内点击不触发折叠
-  const head = e.target.closest(".card-head");
-  if (!head) return;
-  const card = head.closest(".card");
+  const toggle = e.target.closest("[data-card-toggle]");
+  if (!toggle) return;
+  const card = toggle.closest(".card");
   if (!card) return;
-  const name = card.id.slice(5); // 去掉 "card-" 前缀
-  if (card.classList.toggle("collapsed")) collapsedCards.add(name);
+  const name = toggle.dataset.cardToggle;
+  const collapsed = card.classList.toggle("collapsed");
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  if (collapsed) collapsedCards.add(name);
   else collapsedCards.delete(name);
 });
 
-$("#log").innerHTML = `<div class="empty">等待请求…(对 /v1/responses 或 /v1/messages 发一次请求即可看到)</div>`;
+$("#log").innerHTML = `<div class="empty">暂无请求日志，向 /v1/responses 或 /v1/messages 发一次请求即可看到</div>`;
 updateLogCount(0);
 
 loadNetinfo();

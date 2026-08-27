@@ -1,10 +1,10 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,178 +30,198 @@ func (fakeResponsesSubscription) Status() provider.ProviderStatus {
 	}
 }
 
-func TestResponsesUpstreamSaveRedactsAndRetainsOmittedAPIKey(t *testing.T) {
-	manager, configPath := newTestResponsesManager(t)
+func testCodexProfiles(baseURL string) string {
+	return `[gateway]
+OPENAI_BASE_URL=` + baseURL + `
+OPENAI_API_KEY=` + testResponsesAPIKey + `
+OPENAI_DEFAULT_MODEL=model-one
+
+[broken]
+OPENAI_BASE_URL=not-a-url
+OPENAI_API_KEY=secret
+OPENAI_DEFAULT_MODEL=bad-model
+`
+}
+
+func TestResponsesUpstreamGetRedactsFileSuppliers(t *testing.T) {
+	manager, _, profilesPath := newTestResponsesManager(t)
+	writeCodexProfiles(t, profilesPath, testCodexProfiles("http://127.0.0.1:8080/v1"))
+	manager.loadProfiles(provider.CustomResponsesConfig{})
+
 	mux := http.NewServeMux()
 	registerResponsesUpstreamAPI(mux, manager)
-
-	first := `{"name":"Test VOD","base_url":"https://api.example.com/v1","api_key":"` + testResponsesAPIKey + `","default_model":"model-one"}`
-	response := upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/save", first)
+	response := upstreamAPIRequest(t, mux, http.MethodGet, "/api/responses-upstream", "")
 	if response.Code != http.StatusOK {
-		t.Fatalf("first save status = %d, body = %s", response.Code, response.Body.String())
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	assertResponseDoesNotContainSecret(t, response.Body.String())
-	assertSanitizedCustomView(t, response.Body.Bytes(), true, "Test VOD", "model-one")
-
-	// The UI deliberately omits api_key when its password field is blank. That
-	// must preserve the already-saved credential instead of erasing it.
-	second := `{"name":"Renamed","base_url":"https://api.example.com/v1","default_model":"model-two"}`
-	response = upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/save", second)
-	if response.Code != http.StatusOK {
-		t.Fatalf("second save status = %d, body = %s", response.Code, response.Body.String())
+	var decoded struct {
+		Active   string `json:"active"`
+		Profiles []struct {
+			Name      string `json:"name"`
+			Valid     bool   `json:"valid"`
+			HasAPIKey bool   `json:"has_api_key"`
+		} `json:"profiles"`
+		File string `json:"file"`
 	}
-	assertResponseDoesNotContainSecret(t, response.Body.String())
-	assertSanitizedCustomView(t, response.Body.Bytes(), true, "Renamed", "model-two")
-
-	persisted, err := readConfigFile(configPath)
-	if err != nil {
-		t.Fatalf("read persisted config: %v", err)
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
 	}
-	if persisted.CustomResponses.APIKey != testResponsesAPIKey {
-		t.Fatalf("omitted api_key did not retain the saved credential")
+	if decoded.Active != "" || len(decoded.Profiles) != 2 || !decoded.Profiles[0].Valid || !decoded.Profiles[0].HasAPIKey || decoded.Profiles[1].Valid {
+		t.Fatalf("view = %#v", decoded)
 	}
-	if got := manager.runtime.Snapshot().Custom.APIKey; got != testResponsesAPIKey {
-		t.Fatalf("runtime api_key was not retained")
-	}
-
-	response = upstreamAPIRequest(t, mux, http.MethodGet, "/api/responses-upstream", "")
-	if response.Code != http.StatusOK {
-		t.Fatalf("GET status = %d, body = %s", response.Code, response.Body.String())
-	}
-	assertResponseDoesNotContainSecret(t, response.Body.String())
-	if strings.Contains(response.Body.String(), `"api_key"`) {
-		t.Fatalf("management response exposed an api_key field: %s", response.Body.String())
+	if decoded.File != profilesPath {
+		t.Fatalf("file = %q, want %q", decoded.File, profilesPath)
 	}
 }
 
-func TestResponsesUpstreamActivateAndClearPersistState(t *testing.T) {
-	manager, configPath := newTestResponsesManager(t)
+func TestResponsesUpstreamActivatePersistsSupplierAndSubscription(t *testing.T) {
+	manager, configPath, profilesPath := newTestResponsesManager(t)
+	writeCodexProfiles(t, profilesPath, testCodexProfiles("http://127.0.0.1:8080/v1"))
+	manager.loadProfiles(provider.CustomResponsesConfig{})
 	mux := http.NewServeMux()
 	registerResponsesUpstreamAPI(mux, manager)
 
-	saveBody := `{"name":"Test upstream","base_url":"https://api.example.com/v1","api_key":"` + testResponsesAPIKey + `","default_model":"model-one"}`
-	if response := upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/save", saveBody); response.Code != http.StatusOK {
-		t.Fatalf("save status = %d, body = %s", response.Code, response.Body.String())
-	}
-
-	response := upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/activate", `{"source":"custom"}`)
+	response := upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/activate", `{"name":"gateway"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("activate status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if got := manager.runtime.Snapshot().ActiveSource; got != provider.ResponsesSourceCustom {
-		t.Fatalf("runtime source = %q, want custom", got)
+	if snapshot := manager.runtime.Snapshot(); snapshot.ActiveSource != provider.ResponsesSourceCustom || snapshot.Custom.Name != "gateway" {
+		t.Fatalf("snapshot = %#v", snapshot)
 	}
 	persisted, err := readConfigFile(configPath)
 	if err != nil {
-		t.Fatalf("read config after activate: %v", err)
+		t.Fatal(err)
 	}
-	if persisted.ResponsesSource != provider.ResponsesSourceCustom {
-		t.Fatalf("persisted source = %q, want custom", persisted.ResponsesSource)
-	}
-	if persisted.CustomResponses.APIKey != testResponsesAPIKey {
-		t.Fatal("activate lost persisted custom credential")
+	if persisted.CodexUpstream != "gateway" || persisted.ResponsesSource != provider.ResponsesSourceCustom {
+		t.Fatalf("persisted = %#v", persisted)
 	}
 
-	response = upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/clear", `{}`)
+	response = upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/activate", `{"name":""}`)
 	if response.Code != http.StatusOK {
-		t.Fatalf("clear status = %d, body = %s", response.Code, response.Body.String())
+		t.Fatalf("subscription status = %d, body = %s", response.Code, response.Body.String())
 	}
-	assertResponseDoesNotContainSecret(t, response.Body.String())
-	snapshot := manager.runtime.Snapshot()
-	if snapshot.ActiveSource != provider.ResponsesSourceSubscription || snapshot.Configured {
-		t.Fatalf("runtime was not reset after clear: %#v", snapshot)
-	}
-	persisted, err = readConfigFile(configPath)
-	if err != nil {
-		t.Fatalf("read config after clear: %v", err)
-	}
-	if persisted.ResponsesSource != provider.ResponsesSourceSubscription {
-		t.Fatalf("persisted source after clear = %q, want subscription", persisted.ResponsesSource)
-	}
-	if persisted.CustomResponses != (provider.CustomResponsesConfig{}) {
-		t.Fatalf("custom config remained after clear: %#v", persisted.CustomResponses)
+	persisted, _ = readConfigFile(configPath)
+	if persisted.CodexUpstream != "" || persisted.ResponsesSource != provider.ResponsesSourceSubscription {
+		t.Fatalf("subscription persisted = %#v", persisted)
 	}
 }
 
-func TestResponsesUpstreamRestoresPersistedActiveCustomSource(t *testing.T) {
-	manager, configPath := newTestResponsesManager(t)
+func TestResponsesUpstreamReloadMissingSupplierFailsClosedAndRestores(t *testing.T) {
+	manager, configPath, profilesPath := newTestResponsesManager(t)
+	writeCodexProfiles(t, profilesPath, testCodexProfiles("http://127.0.0.1:8080/v1"))
+	manager.loadProfiles(provider.CustomResponsesConfig{})
 	mux := http.NewServeMux()
 	registerResponsesUpstreamAPI(mux, manager)
-	saveBody := `{"name":"Restored upstream","base_url":"https://api.example.com/v1","api_key":"` + testResponsesAPIKey + `","default_model":"restored-model"}`
-	if response := upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/save", saveBody); response.Code != http.StatusOK {
-		t.Fatalf("save status = %d, body = %s", response.Code, response.Body.String())
-	}
-	if response := upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/activate", `{"source":"custom"}`); response.Code != http.StatusOK {
-		t.Fatalf("activate status = %d, body = %s", response.Code, response.Body.String())
+	if response := upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/activate", `{"name":"gateway"}`); response.Code != http.StatusOK {
+		t.Fatalf("activate = %d: %s", response.Code, response.Body.String())
 	}
 
-	persisted, err := readConfigFile(configPath)
-	if err != nil {
-		t.Fatalf("read persisted config: %v", err)
+	writeCodexProfiles(t, profilesPath, "[other]\nOPENAI_BASE_URL=http://127.0.0.1:8081/v1\nOPENAI_API_KEY=key\nOPENAI_DEFAULT_MODEL=model\n")
+	response := upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/reload", `{}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("reload = %d: %s", response.Code, response.Body.String())
 	}
-	providers, restored := configureResponsesProvidersWithConfig(persisted, manager.persist, fakeResponsesSubscription{})
-	if len(providers) != 1 || restored == nil {
-		t.Fatalf("restored providers = %d, manager nil = %v", len(providers), restored == nil)
+	if snapshot := manager.runtime.Snapshot(); snapshot.ActiveSource != provider.ResponsesSourceCustom || snapshot.Configured {
+		t.Fatalf("missing supplier did not fail closed: %#v", snapshot)
 	}
-	snapshot := restored.runtime.Snapshot()
-	if snapshot.ActiveSource != provider.ResponsesSourceCustom || !snapshot.Configured {
-		t.Fatalf("persisted custom source was not restored: %#v", snapshot)
+	recorder := httptest.NewRecorder()
+	manager.runtime.Relay(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`)))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("relay = %d, want 503", recorder.Code)
 	}
-	if snapshot.Custom.APIKey != testResponsesAPIKey || snapshot.Custom.DefaultModel != "restored-model" {
-		t.Fatal("restored custom config did not match persisted values")
+	persisted, _ := readConfigFile(configPath)
+	if persisted.CodexUpstream != "gateway" {
+		t.Fatalf("persisted supplier lost: %#v", persisted)
+	}
+
+	writeCodexProfiles(t, profilesPath, testCodexProfiles("http://127.0.0.1:8080/v1"))
+	response = upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/reload", `{}`)
+	if response.Code != http.StatusOK || manager.runtime.Snapshot().Custom.Name != "gateway" {
+		t.Fatalf("supplier was not restored: %d %s %#v", response.Code, response.Body.String(), manager.runtime.Snapshot())
 	}
 }
 
-func TestResponsesUpstreamRestoreMissingCustomFailsClosed(t *testing.T) {
-	for name, cfg := range map[string]config{
-		"missing custom": {ResponsesSource: provider.ResponsesSourceCustom},
-		"invalid source": {
-			ResponsesSource: provider.ResponsesSource("unexpected"),
-			CustomResponses: provider.CustomResponsesConfig{
-				Name:         "must not be selected",
-				BaseURL:      "https://api.example.com/v1",
-				APIKey:       testResponsesAPIKey,
-				DefaultModel: "model",
-			},
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			providers, manager := configureResponsesProvidersWithConfig(cfg, func(func(*config) error) error { return nil }, fakeResponsesSubscription{})
-			if manager == nil || manager.runtime.Snapshot().ActiveSource != provider.ResponsesSourceCustom {
-				t.Fatal("unavailable persisted selection did not remain fail-closed")
-			}
-			recorder := httptest.NewRecorder()
-			providers[0].Relay(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`)))
-			if recorder.Code != http.StatusServiceUnavailable {
-				t.Fatalf("relay status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
-			}
-		})
+func TestResponsesUpstreamTestsNamedSupplierWithoutActivating(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer "+testResponsesAPIKey {
+			t.Fatalf("unexpected upstream request: %s auth=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_test"}`))
+	}))
+	defer upstream.Close()
+
+	manager, _, profilesPath := newTestResponsesManager(t)
+	writeCodexProfiles(t, profilesPath, testCodexProfiles(upstream.URL+"/v1"))
+	manager.loadProfiles(provider.CustomResponsesConfig{})
+	mux := http.NewServeMux()
+	registerResponsesUpstreamAPI(mux, manager)
+	response := upstreamAPIRequest(t, mux, http.MethodPost, "/api/responses-upstream/test", `{"name":"gateway"}`)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":true`) {
+		t.Fatalf("test = %d: %s", response.Code, response.Body.String())
+	}
+	if manager.runtime.Snapshot().ActiveSource != provider.ResponsesSourceSubscription {
+		t.Fatal("testing a supplier changed active routing")
 	}
 }
 
-func TestPublicMuxDoesNotExposeResponsesManagementAPI(t *testing.T) {
-	manager, _ := newTestResponsesManager(t)
-	handler := buildMux(false, false, "", false, nil, nil, manager, nil, manager.runtime)
+func TestCodexProviderFileMigratesLegacyAndPreservesNonEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, codexProfilesFileName)
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	legacy := provider.CustomResponsesConfig{
+		Name:         "Legacy] Supplier",
+		BaseURL:      "https://api.example.com/v1",
+		APIKey:       testResponsesAPIKey,
+		DefaultModel: "legacy-model",
+	}
+	name, migrated, err := ensureCodexProfilesFile(path, legacy)
+	if err != nil || !migrated || name != "Legacy- Supplier" {
+		t.Fatalf("migration = %q/%v, err = %v", name, migrated, err)
+	}
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v", info.Mode().Perm())
+	}
+	content, _ := os.ReadFile(path)
+	parsed, err := provider.ParseCodexProfiles(content)
+	if err != nil || len(parsed.Profiles) != 1 {
+		t.Fatalf("parsed = %#v, err = %v", parsed, err)
+	}
 
-	for _, test := range []struct {
-		method string
-		path   string
-		body   string
-	}{
-		{method: http.MethodGet, path: "/api/responses-upstream"},
-		{method: http.MethodPost, path: "/api/responses-upstream/save", body: `{}`},
-		{method: http.MethodPost, path: "/api/responses-upstream/activate", body: `{}`},
-		{method: http.MethodPost, path: "/api/responses-upstream/test", body: `{}`},
-		{method: http.MethodPost, path: "/api/responses-upstream/clear", body: `{}`},
-	} {
-		t.Run(test.method+" "+test.path, func(t *testing.T) {
-			req := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
-			recorder := httptest.NewRecorder()
-			handler.ServeHTTP(recorder, req)
-			if recorder.Code != http.StatusNotFound {
-				t.Fatalf("status = %d, want 404; body = %s", recorder.Code, recorder.Body.String())
-			}
-		})
+	if err := os.WriteFile(path, []byte("[keep]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, migrated, err = ensureCodexProfilesFile(path, legacy)
+	content, _ = os.ReadFile(path)
+	if err != nil || migrated || string(content) != "[keep]\n" {
+		t.Fatalf("non-empty file changed: migrated=%v err=%v content=%q", migrated, err, content)
+	}
+}
+
+func TestResponsesFileManagedEndpointsAndPublicIsolation(t *testing.T) {
+	manager, _, profilesPath := newTestResponsesManager(t)
+	writeCodexProfiles(t, profilesPath, testCodexProfiles("http://127.0.0.1:8080/v1"))
+	manager.loadProfiles(provider.CustomResponsesConfig{})
+	mux := http.NewServeMux()
+	registerResponsesUpstreamAPI(mux, manager)
+	for _, path := range []string{"/api/responses-upstream/save", "/api/responses-upstream/clear"} {
+		response := upstreamAPIRequest(t, mux, http.MethodPost, path, `{}`)
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), codexProfilesFileName) {
+			t.Fatalf("%s = %d: %s", path, response.Code, response.Body.String())
+		}
+	}
+
+	publicHandler := buildMux(false, false, "", false, nil, nil, manager, nil, manager.runtime)
+	for _, path := range []string{"/api/responses-upstream", "/api/responses-upstream/reload"} {
+		recorder := httptest.NewRecorder()
+		publicHandler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("public %s = %d", path, recorder.Code)
+		}
 	}
 }
 
@@ -226,19 +246,31 @@ func TestLocalNetinfoProvidesDownstreamKeyForRemoteClientConfigs(t *testing.T) {
 	}
 }
 
-func newTestResponsesManager(t *testing.T) (*responsesUpstreamManager, string) {
+func newTestResponsesManager(t *testing.T) (*responsesUpstreamManager, string, string) {
 	t.Helper()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".ferridex", "config.json")
+	profilesPath := filepath.Join(dir, codexProfilesFileName)
 	subscription := fakeResponsesSubscription{}
-	runtime := provider.NewResponsesProvider(subscription)
-	path := filepath.Join(t.TempDir(), ".ferridex", "config.json")
 	manager := &responsesUpstreamManager{
-		runtime:      runtime,
+		runtime:      provider.NewResponsesProvider(subscription),
 		subscription: subscription,
+		profilesPath: profilesPath,
 		persist: func(update func(*config) error) error {
-			return updateConfigFile(path, update)
+			return updateConfigFile(configPath, update)
+		},
+		readPersisted: func() (config, error) {
+			return readConfigFile(configPath)
 		},
 	}
-	return manager, path
+	return manager, configPath, profilesPath
+}
+
+func writeCodexProfiles(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func upstreamAPIRequest(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -254,25 +286,7 @@ func upstreamAPIRequest(t *testing.T, handler http.Handler, method, path, body s
 
 func assertResponseDoesNotContainSecret(t *testing.T, body string) {
 	t.Helper()
-	if strings.Contains(body, testResponsesAPIKey) {
+	if strings.Contains(body, testResponsesAPIKey) || strings.Contains(body, `"api_key"`) {
 		t.Fatalf("management response leaked the API key: %s", body)
-	}
-}
-
-func assertSanitizedCustomView(t *testing.T, body []byte, configured bool, name, model string) {
-	t.Helper()
-	var decoded struct {
-		Custom struct {
-			Configured   bool   `json:"configured"`
-			Name         string `json:"name"`
-			DefaultModel string `json:"default_model"`
-			HasAPIKey    bool   `json:"has_api_key"`
-		} `json:"custom"`
-	}
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&decoded); err != nil {
-		t.Fatalf("decode management response: %v", err)
-	}
-	if decoded.Custom.Configured != configured || decoded.Custom.Name != name || decoded.Custom.DefaultModel != model || !decoded.Custom.HasAPIKey {
-		t.Fatalf("unexpected sanitized custom view: %#v", decoded.Custom)
 	}
 }

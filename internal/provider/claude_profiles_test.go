@@ -86,6 +86,21 @@ ANTHROPIC_BASE_URL="https://b.example"
 	}
 }
 
+func TestParseClaudeProfilesWarningsDoNotEchoMalformedCredential(t *testing.T) {
+	const secret = "sk-secret-must-not-leak"
+	parsed, err := ParseClaudeProfiles([]byte("[supplier]\nANTHROPIC_AUTH_TOKEN " + secret + "\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	allWarnings := strings.Join(parsed.Warnings, "\n")
+	for _, entry := range parsed.Profiles {
+		allWarnings += strings.Join(entry.Warnings, "\n")
+	}
+	if strings.Contains(allWarnings, secret) {
+		t.Fatalf("warning leaked malformed credential: %q", allWarnings)
+	}
+}
+
 func TestParseClaudeProfilesSkipsKeylessSections(t *testing.T) {
 	src := "[ghost]\n# nothing here\n[real]\nANTHROPIC_AUTH_TOKEN=\"sk\"\n"
 	parsed, err := ParseClaudeProfiles([]byte(src))

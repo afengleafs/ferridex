@@ -21,8 +21,12 @@ type config struct {
 	ResponsesSource provider.ResponsesSource       `json:"responses_source,omitempty"`
 	CustomResponses provider.CustomResponsesConfig `json:"custom_responses,omitempty"`
 	// ClaudeUpstream is the active Claude profile name from
-	// ferridex-profiles.env; empty means the built-in Anthropic subscription.
+	// claude_provider.env; empty means the built-in Anthropic subscription.
 	ClaudeUpstream string `json:"claude_upstream,omitempty"`
+	// CodexUpstream is the active supplier name from codex_provider.env; empty
+	// means the built-in ChatGPT subscription. Legacy ResponsesSource and
+	// CustomResponses fields are retained for one-way migration and rollback.
+	CodexUpstream string `json:"codex_upstream,omitempty"`
 }
 
 var configMu sync.Mutex

@@ -46,7 +46,7 @@ func newTestClaudeUpstreamManager(t *testing.T) (*claudeUpstreamManager, string,
 	subscription := fakeClaudeSubscriptionProvider{}
 	runtime := provider.NewClaudeUpstreamProvider(subscription)
 	configPath := filepath.Join(t.TempDir(), ".ferridex", "config.json")
-	profilesPath := filepath.Join(t.TempDir(), "ferridex-profiles.env")
+	profilesPath := filepath.Join(t.TempDir(), claudeProfilesFileName)
 	manager := &claudeUpstreamManager{
 		runtime:      runtime,
 		subscription: subscription,
@@ -245,13 +245,14 @@ func TestConfigureClaudeProvidersWithConfig(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
-			profilesPath := filepath.Join(dir, "ferridex-profiles.env")
+			profilesPath := filepath.Join(dir, claudeProfilesFileName)
 			writeClaudeProfiles(t, profilesPath, testClaudeProfilesEnv)
 
 			configured, manager := configureClaudeProvidersWithConfig(
 				config{ClaudeUpstream: test.persisted},
 				func(func(*config) error) error { return nil },
 				profilesPath,
+				"",
 				fakeClaudeSubscriptionProvider{},
 			)
 			if manager == nil {
@@ -319,8 +320,9 @@ func TestPublicMuxDoesNotExposeClaudeManagementAPI(t *testing.T) {
 }
 
 func TestEnsureClaudeProfilesFileCreatesOnce(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ferridex-profiles.env")
-	if err := ensureClaudeProfilesFile(path); err != nil {
+	dir := t.TempDir()
+	path := filepath.Join(dir, claudeProfilesFileName)
+	if _, err := ensureClaudeProfilesFile(path, ""); err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
 	info, err := os.Stat(path)
@@ -346,7 +348,7 @@ func TestEnsureClaudeProfilesFileCreatesOnce(t *testing.T) {
 	if err := os.WriteFile(path, []byte("[keep]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureClaudeProfilesFile(path); err != nil {
+	if _, err := ensureClaudeProfilesFile(path, ""); err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
 	content, err = os.ReadFile(path)
@@ -355,5 +357,27 @@ func TestEnsureClaudeProfilesFileCreatesOnce(t *testing.T) {
 	}
 	if string(content) != "[keep]\n" {
 		t.Fatalf("existing file was overwritten: %q", content)
+	}
+
+	// A zero-byte placeholder is populated from the legacy file exactly once.
+	legacyPath := filepath.Join(dir, legacyClaudeProfilesFileName)
+	migratedPath := filepath.Join(dir, "migrated-"+claudeProfilesFileName)
+	if err := os.WriteFile(migratedPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(testClaudeProfilesEnv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := ensureClaudeProfilesFile(migratedPath, legacyPath)
+	if err != nil || !migrated {
+		t.Fatalf("legacy migration = %v, err = %v", migrated, err)
+	}
+	content, _ = os.ReadFile(migratedPath)
+	if string(content) != testClaudeProfilesEnv {
+		t.Fatal("legacy Claude suppliers were not copied exactly")
+	}
+	info, _ = os.Stat(migratedPath)
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("migrated mode = %v", info.Mode().Perm())
 	}
 }

@@ -589,6 +589,17 @@ func (p *ResponsesProvider) TestCustom(ctx context.Context) (CustomResponsesTest
 	return custom.test(ctx)
 }
 
+// TestCustomResponses performs the same explicit minimal request without
+// mutating a live ResponsesProvider. It is used by the dashboard to test any
+// file-backed supplier, including one that is not currently active.
+func TestCustomResponses(ctx context.Context, cfg CustomResponsesConfig) (CustomResponsesTestResult, error) {
+	custom, err := NewCustomResponsesProvider(cfg)
+	if err != nil {
+		return CustomResponsesTestResult{}, err
+	}
+	return custom.test(ctx)
+}
+
 // QueryUsage deliberately delegates only when subscription is active. This
 // method keeps the existing on-demand usage API available after wrapping Codex.
 func (p *ResponsesProvider) QueryUsage(ctx context.Context) ([]UsageWindow, error) {

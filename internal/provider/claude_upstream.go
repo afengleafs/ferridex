@@ -29,7 +29,7 @@ const (
 
 var (
 	// ErrClaudeProfileNotConfigured is returned when a profile is selected or
-	// restored before one has been loaded from ferridex-profiles.env.
+	// restored before one has been loaded from claude_provider.env.
 	ErrClaudeProfileNotConfigured = errors.New("custom Claude upstream profile is not configured")
 	// ErrClaudeSubscriptionNotConfigured is only possible when a switcher was
 	// constructed without its subscription provider.
@@ -323,7 +323,7 @@ func writeClaudeUpstreamError(w http.ResponseWriter, status int, message string)
 }
 
 // ClaudeUpstreamProvider switches /v1/messages between the local Anthropic
-// subscription and one custom profile loaded from ferridex-profiles.env.
+// subscription and one custom supplier loaded from claude_provider.env.
 type ClaudeUpstreamProvider struct {
 	mu           sync.RWMutex
 	subscription Provider

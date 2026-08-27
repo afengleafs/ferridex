@@ -1,7 +1,7 @@
 package server
 
 // Dashboard management for Claude upstream profiles: a hand-edited
-// ferridex-profiles.env in the working directory defines switchable
+// claude_provider.env in the working directory defines switchable
 // Anthropic-compatible upstreams; this manager loads it, hot-applies the
 // persisted choice at startup, and serves /api/claude-upstream* so the panel
 // can list, activate and reload profiles. Mirrors responsesUpstreamManager.
@@ -19,7 +19,10 @@ import (
 	"ferridex/internal/provider"
 )
 
-const claudeProfilesFileName = "ferridex-profiles.env"
+const (
+	claudeProfilesFileName       = "claude_provider.env"
+	legacyClaudeProfilesFileName = "ferridex-profiles.env"
+)
 
 // claudeUpstreamManager serializes dashboard mutations so the persisted
 // selection and the live routing decision move together. Handlers must hold mu.
@@ -30,6 +33,7 @@ type claudeUpstreamManager struct {
 	persist       func(func(*config) error) error
 	readPersisted func() (config, error) // nil -> readConfigFile(configPath())
 	profilesPath  string
+	legacyPath    string
 	entries       []provider.ClaudeProfileEntry
 	fileError     string
 	warnings      []string
@@ -42,14 +46,14 @@ func configureClaudeProviders(providers ...provider.Provider) ([]provider.Provid
 		log.Printf("无法读取 Claude 上游配置,Claude 路由将使用本机订阅: %v", err)
 		cfg = config{}
 	}
-	providers, manager := configureClaudeProvidersWithConfig(cfg, updateConfig, claudeProfilesPath(), providers...)
+	providers, manager := configureClaudeProvidersWithConfig(cfg, updateConfig, claudeProfilesPath(), legacyClaudeProfilesPath(), providers...)
 	if manager != nil {
 		manager.readPersisted = func() (config, error) { return readConfigFile(configPath()) }
 	}
 	return providers, manager
 }
 
-func configureClaudeProvidersWithConfig(cfg config, persist func(func(*config) error) error, profilesPath string, providers ...provider.Provider) ([]provider.Provider, *claudeUpstreamManager) {
+func configureClaudeProvidersWithConfig(cfg config, persist func(func(*config) error) error, profilesPath, legacyPath string, providers ...provider.Provider) ([]provider.Provider, *claudeUpstreamManager) {
 	configured := append([]provider.Provider(nil), providers...)
 	for i, current := range configured {
 		if current.Name() != "claude" {
@@ -65,6 +69,7 @@ func configureClaudeProvidersWithConfig(cfg config, persist func(func(*config) e
 			subscription: current,
 			persist:      persist,
 			profilesPath: profilesPath,
+			legacyPath:   legacyPath,
 		}
 		manager.loadProfiles()
 		manager.applyPersisted(cfg.ClaudeUpstream)
@@ -83,24 +88,38 @@ func claudeProfilesPath() string {
 	return filepath.Join(dir, claudeProfilesFileName)
 }
 
+func legacyClaudeProfilesPath() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		dir = "."
+	}
+	return filepath.Join(dir, legacyClaudeProfilesFileName)
+}
+
 // ensureClaudeProfilesFile writes the commented template on first use. It never
 // overwrites an existing file, and creates it user-only because enabled
 // profiles keep real upstream credentials there.
-func ensureClaudeProfilesFile(path string) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+func ensureClaudeProfilesFile(path, legacyPath string) (bool, error) {
+	var migration []byte
+	if legacyPath != "" {
+		legacy, err := os.ReadFile(legacyPath)
+		if err == nil && len(legacy) > 0 {
+			migration = legacy
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
 	}
-	return os.WriteFile(path, []byte(provider.DefaultClaudeProfilesTemplate()), 0o600)
+	return ensurePrivateProviderFile(path, migration, provider.DefaultClaudeProfilesTemplate())
 }
 
 // loadProfiles (re)reads the env file and loads every valid profile into the
 // runtime switcher. Parse problems degrade to warnings surfaced via the API —
 // one bad line never invalidates the rest of the file.
 func (m *claudeUpstreamManager) loadProfiles() {
-	if err := ensureClaudeProfilesFile(m.profilesPath); err != nil {
+	if migrated, err := ensureClaudeProfilesFile(m.profilesPath, m.legacyPath); err != nil {
 		m.fileError = err.Error()
+	} else if migrated {
+		log.Printf("已把 %s 迁移到 %s;旧文件保留用于回退", legacyClaudeProfilesFileName, claudeProfilesFileName)
 	}
 	src, err := os.ReadFile(m.profilesPath)
 	if err != nil {
@@ -120,7 +139,7 @@ func (m *claudeUpstreamManager) loadProfiles() {
 	for _, entry := range parsed.Profiles {
 		if cfg, err := provider.ClaudeProfileFromValues(entry); err == nil {
 			if err := m.runtime.SetProfile(cfg); err != nil {
-				log.Printf("忽略无效的 Claude 上游档案 %q: %v", entry.Name, err)
+				log.Printf("忽略无效的 Claude 上游供应商 %q: %v", entry.Name, err)
 			}
 		}
 	}
@@ -141,24 +160,24 @@ func (m *claudeUpstreamManager) applyPersisted(name string) {
 	if !ok {
 		_ = m.runtime.RestoreActive("")
 		m.staleProfile = name
-		log.Printf("已保存的 Claude 上游档案 %q 不在 %s 中,已回退到本机 Anthropic 订阅;把档案加回文件后点击「重新加载档案」即可恢复", name, claudeProfilesFileName)
+		log.Printf("已保存的 Claude 上游供应商 %q 不在 %s 中,已回退到本机 Anthropic 订阅;把供应商加回文件后点击「重新加载」即可恢复", name, claudeProfilesFileName)
 		return
 	}
 	cfg, err := provider.ClaudeProfileFromValues(entry)
 	if err != nil {
 		_ = m.runtime.RestoreActive("")
 		m.staleProfile = name
-		log.Printf("Claude 上游档案 %q 无效,已回退到本机 Anthropic 订阅: %v", name, err)
+		log.Printf("Claude 上游供应商 %q 无效,已回退到本机 Anthropic 订阅: %v", name, err)
 		return
 	}
 	if err := m.runtime.SetProfile(cfg); err != nil {
 		_ = m.runtime.RestoreActive("")
 		m.staleProfile = name
-		log.Printf("Claude 上游档案 %q 无法应用,已回退到本机 Anthropic 订阅: %v", name, err)
+		log.Printf("Claude 上游供应商 %q 无法应用,已回退到本机 Anthropic 订阅: %v", name, err)
 		return
 	}
 	if err := m.runtime.RestoreActive(name); err != nil {
-		log.Printf("恢复 Claude 上游档案 %q 失败: %v", name, err)
+		log.Printf("恢复 Claude 上游供应商 %q 失败: %v", name, err)
 		return
 	}
 	m.staleProfile = ""
@@ -314,12 +333,12 @@ func (m *claudeUpstreamManager) handleActivate(w http.ResponseWriter, r *http.Re
 
 	entry, ok := m.entryByName(name)
 	if !ok {
-		writeResponsesUpstreamError(w, http.StatusNotFound, fmt.Sprintf("未知档案 %q;请确认 %s 中存在该 [档案名] 段,或先「重新加载档案」", name, claudeProfilesFileName))
+		writeResponsesUpstreamError(w, http.StatusNotFound, fmt.Sprintf("未知供应商 %q;请确认 %s 中存在该 [供应商名] 段,或先点击「重新加载」", name, claudeProfilesFileName))
 		return
 	}
 	candidate, err := provider.ClaudeProfileFromValues(entry)
 	if err != nil {
-		writeResponsesUpstreamError(w, http.StatusConflict, redactClaudeSecret("档案无效: "+err.Error(), candidate))
+		writeResponsesUpstreamError(w, http.StatusConflict, redactClaudeSecret("供应商无效: "+err.Error(), candidate))
 		return
 	}
 	if err := m.persist(func(cfg *config) error {
@@ -335,7 +354,7 @@ func (m *claudeUpstreamManager) handleActivate(w http.ResponseWriter, r *http.Re
 			return nil
 		})
 		m.restoreRuntime(before)
-		writeResponsesUpstreamError(w, http.StatusInternalServerError, redactClaudeSecret("应用档案失败: "+err.Error(), candidate))
+		writeResponsesUpstreamError(w, http.StatusInternalServerError, redactClaudeSecret("应用供应商失败: "+err.Error(), candidate))
 		return
 	}
 	if err := m.runtime.ActivateProfile(name); err != nil {
@@ -365,7 +384,7 @@ func (m *claudeUpstreamManager) handleReload(w http.ResponseWriter, r *http.Requ
 	}
 	persisted := ""
 	if cfg, err := readPersisted(); err != nil {
-		log.Printf("重新加载 Claude 档案时读取配置失败: %v", err)
+		log.Printf("重新加载 Claude 供应商时读取配置失败: %v", err)
 	} else {
 		persisted = cfg.ClaudeUpstream
 	}

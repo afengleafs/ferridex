@@ -1,7 +1,7 @@
 package provider
 
-// Parsing for ferridex-profiles.env: a hand-edited, INI-like env file whose
-// [name] sections each describe one switchable Claude upstream profile using
+// Parsing for claude_provider.env: a hand-edited, INI-like env file whose
+// [name] sections each describe one switchable Claude upstream supplier using
 // the same ANTHROPIC_* variable names Claude Code itself accepts. The parser
 // is pure (no I/O, no logging): problems are surfaced as warnings so one bad
 // line never invalidates the rest of the file.
@@ -54,7 +54,7 @@ type ClaudeProfilesFile struct {
 // unknown keys and malformed lines produce warnings and are skipped.
 func ParseClaudeProfiles(src []byte) (ClaudeProfilesFile, error) {
 	if len(src) > claudeProfilesMaxSize {
-		return ClaudeProfilesFile{}, fmt.Errorf("profiles 文件超过 %d 字节上限", claudeProfilesMaxSize)
+		return ClaudeProfilesFile{}, fmt.Errorf("供应商文件超过 %d 字节上限", claudeProfilesMaxSize)
 	}
 	text := strings.TrimPrefix(string(src), "\ufeff")
 	out := ClaudeProfilesFile{}
@@ -74,12 +74,12 @@ func ParseClaudeProfiles(src []byte) (ClaudeProfilesFile, error) {
 				name = strings.TrimSpace(line[1:end])
 			}
 			if name == "" {
-				out.Warnings = append(out.Warnings, warnAt(lineNo, "空的档案名称,该段已忽略"))
+				out.Warnings = append(out.Warnings, warnAt(lineNo, "空的供应商名称,该段已忽略"))
 				current = nil
 				continue
 			}
 			if idx, dup := index[name]; dup {
-				out.Warnings = append(out.Warnings, warnAt(lineNo, fmt.Sprintf("档案 %q 重复定义,以最后一次为准", name)))
+				out.Warnings = append(out.Warnings, warnAt(lineNo, fmt.Sprintf("供应商 %q 重复定义,以最后一次为准", name)))
 				// Last definition wins: start the section over, keep old warnings.
 				out.Profiles[idx].Values = map[string]string{}
 				out.Profiles[idx].Line = lineNo
@@ -103,7 +103,9 @@ func ParseClaudeProfiles(src []byte) (ClaudeProfilesFile, error) {
 		key, value, found := strings.Cut(body, "=")
 		key = strings.TrimSpace(key)
 		if !found || !isEnvKey(key) {
-			warn := warnAt(lineNo, fmt.Sprintf("无法识别的行 %q,已忽略", truncateForWarning(line)))
+			// Do not echo malformed content: users commonly omit "=" while
+			// pasting a credential, and warnings are returned by the dashboard API.
+			warn := warnAt(lineNo, "无法识别的配置行,已忽略")
 			appendProfileWarning(&out, &current, warn)
 			continue
 		}
@@ -114,7 +116,7 @@ func ParseClaudeProfiles(src []byte) (ClaudeProfilesFile, error) {
 			continue
 		}
 		if current == nil {
-			out.Warnings = append(out.Warnings, warnAt(lineNo, fmt.Sprintf("%s 出现在任何 [档案名] 之前,已忽略", key)))
+			out.Warnings = append(out.Warnings, warnAt(lineNo, fmt.Sprintf("%s 出现在任何 [供应商名] 之前,已忽略", key)))
 			continue
 		}
 		current.Values[key] = unquoteEnvValue(strings.TrimSpace(value))
@@ -123,7 +125,7 @@ func ParseClaudeProfiles(src []byte) (ClaudeProfilesFile, error) {
 	kept := out.Profiles[:0]
 	for _, entry := range out.Profiles {
 		if len(entry.Values) == 0 {
-			out.Warnings = append(out.Warnings, fmt.Sprintf("档案 %q(第 %d 行)没有可识别的配置项,已忽略", entry.Name, entry.Line))
+			out.Warnings = append(out.Warnings, fmt.Sprintf("供应商 %q(第 %d 行)没有可识别的配置项,已忽略", entry.Name, entry.Line))
 			delete(index, entry.Name)
 			continue
 		}
@@ -150,17 +152,17 @@ func ClaudeProfileFromValues(e ClaudeProfileEntry) (ClaudeProfileConfig, error) 
 	})
 }
 
-// DefaultClaudeProfilesTemplate is written to ferridex-profiles.env on first
+// DefaultClaudeProfilesTemplate is written to claude_provider.env on first
 // start. Every line is a comment so parsing the untouched template yields zero
 // profiles and zero warnings.
 func DefaultClaudeProfilesTemplate() string {
-	return `# ferridex Claude 上游档案
+	return `# ferridex Claude 上游供应商
 #
 # 本文件定义网页「Claude 上游」面板中可一键切换的自定义 Anthropic 上游。
-# 语法:[档案名] 分段,段内每行一个 KEY=VALUE,支持 export 前缀与单/双引号;
-# 以 # 开头的行为注释。编辑后点击面板中的「重新加载档案」即可生效。
+# 语法:[供应商名] 分段,段内每行一个 KEY=VALUE,支持 export 前缀与单/双引号;
+# 以 # 开头的行为注释。编辑后点击面板中的「重新加载」即可生效。
 #
-# 每个档案可用的字段:
+# 每个供应商可用的字段:
 #   ANTHROPIC_BASE_URL              上游 API 根地址(必填,如 https://openrouter.ai/api)
 #   ANTHROPIC_AUTH_TOKEN            Bearer 凭据(请求带 Authorization: Bearer <值>)
 #   ANTHROPIC_API_KEY               x-api-key 凭据(与 AUTH_TOKEN 同时设置时 Bearer 优先)
@@ -179,7 +181,7 @@ func DefaultClaudeProfilesTemplate() string {
 # ANTHROPIC_DEFAULT_HAIKU_MODEL="stealth/ox-alpha"
 # CLAUDE_CODE_SUBAGENT_MODEL="stealth/ox-alpha"
 #
-# 安全提示:启用档案后本文件会保存真实凭据。它已被 .gitignore 忽略,
+# 安全提示:启用供应商后本文件会保存真实凭据。它已被 .gitignore 忽略,
 # 请勿提交到仓库或分享给他人。
 `
 }
@@ -222,12 +224,4 @@ func isEnvKey(key string) bool {
 		}
 	}
 	return true
-}
-
-func truncateForWarning(s string) string {
-	runes := []rune(s)
-	if len(runes) <= 40 {
-		return s
-	}
-	return string(runes[:40]) + "…"
 }

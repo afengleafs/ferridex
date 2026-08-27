@@ -136,7 +136,8 @@ func fullTestConfig(suffix string) config {
 			APIKey:       testResponsesAPIKey + "-" + suffix,
 			DefaultModel: "model-" + suffix,
 		},
-		ClaudeUpstream: "claude-profile-" + suffix,
+		ClaudeUpstream: "claude-provider-" + suffix,
+		CodexUpstream:  "codex-provider-" + suffix,
 	}
 }
 
