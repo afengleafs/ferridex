@@ -1,6 +1,35 @@
 package provider
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+)
+
+func TestCodexClientVersion(t *testing.T) {
+	for _, tc := range []struct{ name, ua, version, want string }{
+		{"interactive", "codex_cli_rs/0.153.4 (Linux)", "", "0.153.4"},
+		{"tui", "codex-tui/0.153.4 (Ubuntu 22.4.0; x86_64) xterm-256color (codex-tui; 0.153.4)", "", "0.153.4"},
+		{"exec", "codex_exec/0.153.4 (Ubuntu 22.4.0; x86_64)", "", "0.153.4"},
+		{"explicit wins", "codex_exec/0.153.4", "0.154.0", "0.154.0"},
+		{"prerelease", "codex_cli_rs/0.154.0-alpha.1 (Linux)", "", "0.154.0-alpha.1"},
+		{"unknown client", "curl/8.0.1", "", codexFallbackVersion},
+		{"missing identity", "", "", codexFallbackVersion},
+		{"invalid version", "codex_exec/invalid", "", codexFallbackVersion},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in, out := make(http.Header), make(http.Header)
+			in.Set("User-Agent", tc.ua)
+			in.Set("version", tc.version)
+			setCodexClientHeaders(in, out)
+			if got := out.Get("version"); got != tc.want {
+				t.Fatalf("version = %q, want %q", got, tc.want)
+			}
+			if out.Get("User-Agent") != tc.ua {
+				t.Fatal("User-Agent changed")
+			}
+		})
+	}
+}
 
 func TestParseCodexUsage(t *testing.T) {
 	// Shape captured live from https://chatgpt.com/backend-api/wham/usage.

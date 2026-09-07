@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +37,6 @@ const (
 	// serves a legacy table and gpt-5.6-* returns 404 "Model not found".
 	codexFallbackOriginator = "codex_cli_rs"
 	codexFallbackVersion    = "0.144.1"
-
 )
 
 var codexAuthMu sync.Mutex
@@ -183,11 +183,13 @@ func requestWantsStream(raw []byte) bool {
 	return payload.Stream
 }
 
+var codexUserAgentVersion = regexp.MustCompile(`^(?:codex_cli_rs|codex_exec|codex-tui)/([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)(?:\s|$)`)
+
 // setCodexClientHeaders forwards the downstream client's identity headers
 // upstream. The Codex backend needs originator plus a client version (the
 // `version` header or a codex_cli_rs User-Agent) to serve the current model
-// table; bare clients get impersonated as a recent Codex CLI so gpt-5.6-*
-// doesn't 404 with "Model not found".
+// table. Derive a missing version from recognized Codex User-Agents before
+// falling back, so a current client is not labeled with an older version.
 func setCodexClientHeaders(in, out http.Header) {
 	for _, k := range []string{"originator", "version", "session_id", "User-Agent", "OpenAI-Beta"} {
 		if v := in.Get(k); v != "" {
@@ -198,7 +200,11 @@ func setCodexClientHeaders(in, out http.Header) {
 		out.Set("originator", codexFallbackOriginator)
 	}
 	if out.Get("version") == "" {
-		out.Set("version", codexFallbackVersion)
+		version := codexFallbackVersion
+		if match := codexUserAgentVersion.FindStringSubmatch(out.Get("User-Agent")); len(match) > 1 {
+			version = match[1]
+		}
+		out.Set("version", version)
 	}
 }
 

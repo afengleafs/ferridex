@@ -179,18 +179,6 @@ function authToken() {
   return netinfo.lan_key || "dummy";
 }
 
-function effectiveResponsesModel() {
-  const custom = responsesUpstream.custom || {};
-  const subscription = responsesUpstream.subscription || {};
-  if (responsesUpstream.active_source === "custom" && custom.configured && custom.default_model) {
-    return String(custom.default_model);
-  }
-  if (subscription && typeof subscription === "object" && subscription.default_model) {
-    return String(subscription.default_model);
-  }
-  return "gpt-5.6-sol";
-}
-
 // 供应商激活时,生成的 Claude settings.json 模型名跟随供应商映射(服务端也会改写,
 // 这里让客户端展示的配置与实际生效模型一致)。
 function effectiveClaudeModels() {
@@ -232,7 +220,6 @@ function shellSingleQuote(value) {
 function loadClientConfigs() {
   const baseURL = proxyBaseURL();
   const token = authToken();
-  const model = effectiveResponsesModel();
   const claudeModels = effectiveClaudeModels();
   const claude = {
     env: {
@@ -247,8 +234,7 @@ function loadClientConfigs() {
     skipDangerousModePermissionPrompt: true,
     model: "opus",
   };
-  const codex = `model = ${tomlString(model)}
-model_provider = "ferridex"
+  const codex = `model_provider = "ferridex"
 
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "none"
@@ -264,12 +250,11 @@ stream_max_retries = 5
 stream_idle_timeout_ms = 300000
 requires_openai_auth = false`;
 
-  // 一键启动命令内联当前有效模型、Responses 路由和企业上游所需的稳定重试参数。
+  // Codex 模型由客户端配置或默认值决定；这里只设置 Responses 路由和重试参数。
   // 供应商激活时带上模型 env,让 CLI 界面直接显示供应商配置的实际模型。
   const claudeLaunch = [...claudeModelEnvParts(), `ANTHROPIC_BASE_URL=${baseURL}`, `ANTHROPIC_AUTH_TOKEN=${token}`, "claude"].join(" ");
   const codexLaunch = [
     `LOCAL_PROXY_KEY=${shellSingleQuote(token)} codex`,
-    `-c ${shellSingleQuote(`model=${tomlString(model)}`)}`,
     `-c ${shellSingleQuote('model_provider="ferridex"')}`,
     `-c ${shellSingleQuote('model_reasoning_effort="xhigh"')}`,
     `-c ${shellSingleQuote('model_reasoning_summary="none"')}`,
