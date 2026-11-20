@@ -21,11 +21,15 @@ func TestDashboardUpstreamHubDOM(t *testing.T) {
 	required := map[string]bool{
 		"console":                 false,
 		"console-tab-upstream":    false,
+		"console-tab-usage":       false,
+		"console-tab-speed":       false,
 		"console-tab-providers":   false,
 		"console-tab-access":      false,
 		"console-tab-clients":     false,
 		"console-tab-logs":        false,
 		"pane-upstream":           false,
+		"pane-usage":              false,
+		"pane-speed":              false,
 		"pane-providers":          false,
 		"pane-access":             false,
 		"pane-clients":            false,
@@ -38,6 +42,10 @@ func TestDashboardUpstreamHubDOM(t *testing.T) {
 		"hub-tab-codex":           false,
 		"grok-pane":               false,
 		"hub-tab-grok":            false,
+		"agy-pane":                false,
+		"agy-launch":              false,
+		"agy-cmd":                 false,
+		"hub-tab-agy":             false,
 		"cursor-pane":             false,
 		"hub-tab-cursor":          false,
 		"claude-upstream-sources": false,
@@ -88,6 +96,8 @@ func TestDashboardUpstreamHubDOM(t *testing.T) {
 
 	tabPanels := map[string]string{
 		"console-tab-upstream":  "pane-upstream",
+		"console-tab-usage":     "pane-usage",
+		"console-tab-speed":     "pane-speed",
 		"console-tab-providers": "pane-providers",
 		"console-tab-access":    "pane-access",
 		"console-tab-clients":   "pane-clients",
@@ -96,6 +106,7 @@ func TestDashboardUpstreamHubDOM(t *testing.T) {
 		"hub-tab-codex":         "codex-pane",
 		"hub-tab-grok":          "grok-pane",
 		"hub-tab-cursor":        "cursor-pane",
+		"hub-tab-agy":           "agy-pane",
 	}
 	for tabID, panelID := range tabPanels {
 		tab, tabOK := nodes[tabID]
@@ -123,6 +134,7 @@ func TestDashboardThirdPartyAssetsEmbedded(t *testing.T) {
 		"web/icons/claude.svg",
 		"web/icons/openai.svg",
 		"web/icons/grok.svg",
+		"web/icons/antigravity.svg",
 	} {
 		asset, err := webFS.ReadFile(path)
 		if err != nil {

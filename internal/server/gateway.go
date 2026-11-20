@@ -45,6 +45,7 @@ type logHub struct {
 }
 
 var hub = &logHub{subs: map[chan logEntry]struct{}{}}
+var telemetry = newTelemetryStore(defaultTelemetryPath())
 
 func (h *logHub) add(e logEntry) {
 	h.mu.Lock()
@@ -183,7 +184,7 @@ func isRelayLogPath(path string) bool {
 	case "/v1/responses", "/responses", "/v1/messages", "/messages":
 		return true
 	}
-	if provider.IsGrokPath(path) {
+	if provider.IsAgyPath(path) || provider.IsGrokPath(path) {
 		return true
 	}
 	return provider.IsCursorConnectPath(path)
@@ -196,7 +197,7 @@ func checkKey(r *http.Request, key string) bool {
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") && auth[7:] == key {
 		return true
 	}
-	return r.Header.Get("X-API-Key") == key
+	return r.Header.Get("X-API-Key") == key || (provider.IsAgyPath(r.URL.Path) && r.Header.Get("x-goog-api-key") == key)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -223,6 +224,20 @@ func buildMux(dashboard, lan bool, lanKey string, forceKey bool, tm *tunnelManag
 				http.Error(w, "invalid or missing API key", http.StatusUnauthorized)
 				return
 			}
+			if isConversationRequest(r) {
+				start := time.Now()
+				model, stream := peekRequestMeta(r)
+				upstream := activeUpstreamLabel(p)
+				tw := newTelemetryResponseWriter(w, start, model, stream)
+				p.Relay(tw, r)
+				rec := tw.finish(time.Now())
+				rec.Provider = p.Name()
+				rec.Upstream = upstream
+				rec.Method = r.Method
+				rec.Path = r.URL.Path
+				telemetry.add(rec)
+				return
+			}
 			p.Relay(w, r)
 		}
 	}
@@ -237,6 +252,10 @@ func buildMux(dashboard, lan bool, lanKey string, forceKey bool, tm *tunnelManag
 		case "claude":
 			mux.HandleFunc("POST /v1/messages", relay(p))
 			mux.HandleFunc("POST /messages", relay(p))
+		case "agy":
+			mux.HandleFunc("GET /agy/v1beta/models", relay(p))
+			mux.HandleFunc("GET /agy/v1beta/models/", relay(p))
+			mux.HandleFunc("POST /agy/v1beta/models/", relay(p))
 		case "cursor":
 			cursorProvider = p
 		case "grok":
@@ -284,12 +303,30 @@ func buildMux(dashboard, lan bool, lanKey string, forceKey bool, tm *tunnelManag
 				}
 				ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 				defer cancel()
+				if dq, ok := p.(provider.UsageDetailQuerier); ok {
+					report, err := dq.QueryUsageReport(ctx)
+					if err != nil {
+						writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+						return
+					}
+					writeJSON(w, map[string]any{
+						"ok":         true,
+						"usage":      report.Windows,
+						"report":     report,
+						"queried_at": time.Now().UnixMilli(),
+					})
+					return
+				}
 				windows, err := uq.QueryUsage(ctx)
 				if err != nil {
 					writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 					return
 				}
-				writeJSON(w, map[string]any{"ok": true, "usage": windows})
+				writeJSON(w, map[string]any{
+					"ok":         true,
+					"usage":      windows,
+					"queried_at": time.Now().UnixMilli(),
+				})
 				return
 			}
 			writeJSON(w, map[string]any{"ok": false, "error": "未知 provider: " + name})
@@ -359,6 +396,20 @@ func buildMux(dashboard, lan bool, lanKey string, forceKey bool, tm *tunnelManag
 				writeJSON(w, m)
 			})
 		}
+		mux.HandleFunc("GET /api/metrics", func(w http.ResponseWriter, r *http.Request) {
+			window := r.URL.Query().Get("window")
+			if window == "" {
+				window = "24h"
+			}
+			writeJSON(w, telemetry.snapshot(window, time.Now()))
+		})
+		mux.HandleFunc("POST /api/metrics/clear", func(w http.ResponseWriter, r *http.Request) {
+			if err := telemetry.clear(); err != nil {
+				writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true})
+		})
 		mux.HandleFunc("GET /api/logs/stream", logsStreamHandler)
 		mux.Handle("GET /", dashboardHandler())
 	}
@@ -505,13 +556,14 @@ func RunServe(addr string, open, lan, newKey, autoPort bool, providers ...provid
 			log.Printf("  局域网 未检测到局域网 IPv4 地址")
 		}
 		for _, ip := range ips {
-			log.Printf("  局域网 http://%s:%s  (Codex/Claude/Cursor/Grok 接口,需密钥)", ip, actualPort)
+			log.Printf("  局域网 http://%s:%s  (Codex/Claude/Cursor/Grok/agy 接口,需密钥)", ip, actualPort)
 		}
 		log.Printf("  局域网密钥已写入面板「远程客户端配置」,复制给另一台电脑即可")
 	} else {
 		log.Printf("  Codex  POST http://%s/v1/responses", browserAddr)
 		log.Printf("  Claude POST http://%s/v1/messages", browserAddr)
 		log.Printf("  Cursor agent -e http://localhost:%s --auth-token dummy", actualPort)
+		log.Printf("  agy    Gemini base URL http://%s/agy", browserAddr)
 		log.Printf("  Grok   export GROK_CLI_CHAT_PROXY_BASE_URL=http://%s/grok/v1", browserAddr)
 	}
 	if ptm != nil {
@@ -554,6 +606,8 @@ func RunSingle(addr string, autoPort bool, p provider.Provider) {
 	switch p.Name() {
 	case "cursor":
 		log.Printf("ferridex cursor — agent -e http://localhost:%s --auth-token dummy", actualPort)
+	case "agy":
+		log.Printf("ferridex agy — Gemini base URL http://%s/agy", browserAddr)
 	case "grok":
 		log.Printf("ferridex grok — export GROK_CLI_CHAT_PROXY_BASE_URL=http://%s/grok/v1", browserAddr)
 	default:

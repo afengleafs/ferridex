@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-`ferridex` 是一个运行在本机的 Go 代理，复用已登录的 ChatGPT/Codex、Claude Code、Cursor CLI 与 Grok CLI 订阅，并向本机或通过 SSH 隧道连接的远程主机提供兼容接口。
+`ferridex` 是一个运行在本机的 Go 代理，复用已登录的 ChatGPT/Codex、Claude Code、Cursor CLI、Grok CLI 与 Antigravity CLI 订阅，并向本机或通过 SSH 隧道连接的远程主机提供兼容接口。
 
 > 本项目调用非公开上游端点并读取本机登录凭据，仅适合个人研究和自用。
 > 不要共享或转售代理。需要从公网连接时，请用面板的 ngrok 隧道（强制密钥，且不暴露面板），
@@ -11,7 +11,7 @@
 ## 环境与构建
 
 - Go 1.23 或更高版本
-- 已完成订阅登录的 Codex CLI、Claude Code、Cursor CLI 和/或 Grok CLI（按需）
+- 已完成订阅登录的 Codex CLI、Claude Code、Cursor CLI、Grok CLI 和/或 agy（按需）
 - 使用面板管理反向隧道时，需要本机 `ssh` 与免密密钥（或 `ssh-agent`）
 
 ```bash
@@ -27,7 +27,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ## 启动
 
 ```bash
-# 同时启动 Codex、Claude、Cursor、Grok 和 Web 面板，并自动打开浏览器
+# 同时启动 Codex、Claude、Cursor、Grok、agy 和 Web 面板，并自动打开浏览器
 ferridex serve
 
 # 指定端口 / 不自动打开浏览器 / 端口占用时自动顺延
@@ -43,6 +43,7 @@ ferridex codex
 ferridex claude
 ferridex cursor
 ferridex grok
+ferridex agy
 
 # 检查本机登录状态
 ferridex status
@@ -135,6 +136,30 @@ ferridex 下游密钥；这是 LAN、SSH 和 ngrok 的必需认证，本机回�
   说明：独立的 `GROK_HOME` 避免污染本机真实的 `~/.grok` 登录（`auth_provider_command` 会在刷新时改写 auth.json）。开头的 `rm` 是因为 grok 会缓存下游 token，切换 SSH↔局域网或轮换密钥后不清缓存会用旧 token 导致 `401`。
 
 面板「远程客户端配置」会按当前目标和密钥生成上述命令，可一键复制。
+
+## Antigravity CLI（agy）
+
+先在服务端用 agy 登录，再运行 `ferridex serve`。只启动 agy 代理可用 `ferridex agy`。面板会按当前连接目标生成带下游密钥的启动命令。
+
+```bash
+export GEMINI_API_KEY='<Ferridex downstream key>'
+export GOOGLE_GEMINI_BASE_URL='http://127.0.0.1:8788/agy'
+curl -fsS -H "x-goog-api-key: $GEMINI_API_KEY" "$GOOGLE_GEMINI_BASE_URL/v1beta/models"
+agy --settings '{"modelProvider":"gemini"}'
+```
+
+Python Gemini SDK 可用以下配置，模型 ID 从模型列表中选取。
+
+```python
+import os
+from google import genai
+
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={
+    "base_url": os.environ["GOOGLE_GEMINI_BASE_URL"], "api_version": "v1beta",
+})
+model = next(iter(client.models.list())).name
+print(client.models.generate_content(model=model, contents="Hello").text)
+```
 
 ## SSH 反向隧道
 

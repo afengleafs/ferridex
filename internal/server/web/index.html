@@ -31,7 +31,7 @@
           <span class="brand-sub">订阅本地代理</span>
         </div>
       </div>
-      <div class="health-pill" id="healthbar" aria-live="polite">
+      <div class="health-pill" id="healthbar" role="button" tabindex="0" aria-live="polite" title="查看 Provider 状态">
         <span class="dot hero-dot" id="health-dot"></span>
         <span class="health-text" id="health-text">登录状态检查中…</span>
       </div>
@@ -48,13 +48,24 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 4v16"/><path d="m5 8 14 8"/><path d="m19 8L5 16"/></svg>
           <span class="tab-label tab-label-long">上游</span><span class="tab-label tab-label-short">上游</span>
         </button>
+        <button class="console-tab" id="console-tab-usage" data-console-tab="usage" type="button" role="tab" aria-label="用量监控" aria-controls="pane-usage" aria-selected="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+          <span class="tab-label tab-label-long">用量监控</span><span class="tab-label tab-label-short">用量</span>
+        </button>
+        <button class="console-tab" id="console-tab-speed" data-console-tab="speed" type="button" role="tab" aria-label="响应速度" aria-controls="pane-speed" aria-selected="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>
+          <span class="tab-label tab-label-long">响应速度</span><span class="tab-label tab-label-short">速度</span>
+          <span class="tab-badge" id="tab-badge-speed" hidden></span>
+        </button>
         <button class="console-tab" id="console-tab-providers" data-console-tab="providers" type="button" role="tab" aria-label="Provider 状态" aria-controls="pane-providers" aria-selected="false">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5z"/><path d="m3 13 9 5 9-5"/></svg>
           <span class="tab-label tab-label-long">Provider 状态</span><span class="tab-label tab-label-short">状态</span>
+          <span class="tab-badge" id="tab-badge-providers" hidden></span>
         </button>
         <button class="console-tab" id="console-tab-access" data-console-tab="access" type="button" role="tab" aria-label="远程访问" aria-controls="pane-access" aria-selected="false">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><ellipse cx="12" cy="12" rx="4" ry="9"/></svg>
           <span class="tab-label tab-label-long">远程访问</span><span class="tab-label tab-label-short">访问</span>
+          <span class="tab-dot" id="tab-dot-access" hidden></span>
         </button>
         <button class="console-tab" id="console-tab-clients" data-console-tab="clients" type="button" role="tab" aria-label="客户端" aria-controls="pane-clients" aria-selected="false">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-5-6-5"/><path d="M12 19h8"/></svg>
@@ -63,10 +74,11 @@
         <button class="console-tab" id="console-tab-logs" data-console-tab="logs" type="button" role="tab" aria-label="日志" aria-controls="pane-logs" aria-selected="false">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>
           <span class="tab-label tab-label-long">日志</span><span class="tab-label tab-label-short">日志</span>
+          <span class="tab-badge" id="tab-badge-logs" hidden></span>
         </button>
       </nav>
 
-      <!-- 页 1:上游(切换中心 + provider 状态/用量) -->
+      <!-- 页 1:上游(切换中心 + 快捷操作) -->
       <section class="console-pane" id="pane-upstream" data-console-pane="upstream" role="tabpanel" aria-labelledby="console-tab-upstream">
         <div class="pane-block" id="upstream-hub">
           <div class="block-head">
@@ -74,33 +86,39 @@
               <div class="block-title">上游切换</div>
               <div class="block-desc">在本机订阅与自定义上游之间热切换，客户端无需重启</div>
             </div>
-            <div class="hub-bar">
-              <div class="hub-tabs" role="tablist" aria-label="选择客户端类型">
-                <button class="hub-tab active" id="hub-tab-claude" data-hub-tab="claude" type="button" role="tab" aria-label="Claude 上游" aria-controls="claude-pane" aria-selected="true">
-                  <img class="brand-icon" src="icons/claude.svg" alt="" aria-hidden="true" />
-                  Claude
-                </button>
-                <button class="hub-tab" id="hub-tab-codex" data-hub-tab="codex" type="button" role="tab" aria-label="Codex 上游" aria-controls="codex-pane" aria-selected="false">
-                  <img class="brand-icon brand-icon-mono" src="icons/openai.svg" alt="" aria-hidden="true" />
-                  Codex
-                </button>
-                <button class="hub-tab" id="hub-tab-grok" data-hub-tab="grok" type="button" role="tab" aria-label="Grok 上游" aria-controls="grok-pane" aria-selected="false">
-                  <img class="brand-icon brand-icon-mono" src="icons/grok.svg" alt="" aria-hidden="true" />
-                  Grok
-                </button>
-                <button class="hub-tab" id="hub-tab-cursor" data-hub-tab="cursor" type="button" role="tab" aria-label="Cursor 上游" aria-controls="cursor-pane" aria-selected="false">
-                  <svg class="brand-icon utility-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-5-6-5"/><path d="M12 19h8"/></svg>
-                  Cursor
-                </button>
-              </div>
-              <div class="hub-actions">
-                <button class="ghost-btn" id="hub-copy-launch" type="button">复制 Claude 启动命令</button>
-                <button class="ghost-btn" id="hub-public-toggle" type="button" title="启动 ngrok 公网隧道">启动公网</button>
-                <button class="ghost-btn" id="claude-upstream-reload" type="button">重新加载</button>
-                <span class="upstream-action-status" id="claude-upstream-status" role="status" aria-live="polite"></span>
-                <button class="ghost-btn" id="codex-upstream-reload" type="button" hidden>重新加载</button>
-                <span class="upstream-action-status" id="codex-upstream-status" role="status" aria-live="polite" hidden></span>
-              </div>
+            <span class="route-pill" id="hub-route-pill" title="当前快捷复制命令指向的目标">目标：本机</span>
+          </div>
+
+          <div class="hub-bar">
+            <div class="hub-tabs" role="tablist" aria-label="选择客户端类型">
+              <button class="hub-tab active" id="hub-tab-claude" data-hub-tab="claude" type="button" role="tab" aria-label="Claude 上游" aria-controls="claude-pane" aria-selected="true">
+                <img class="brand-icon" src="icons/claude.svg" alt="" aria-hidden="true" />
+                Claude
+              </button>
+              <button class="hub-tab" id="hub-tab-codex" data-hub-tab="codex" type="button" role="tab" aria-label="Codex 上游" aria-controls="codex-pane" aria-selected="false">
+                <img class="brand-icon brand-icon-mono" src="icons/openai.svg" alt="" aria-hidden="true" />
+                Codex
+              </button>
+              <button class="hub-tab" id="hub-tab-grok" data-hub-tab="grok" type="button" role="tab" aria-label="Grok 上游" aria-controls="grok-pane" aria-selected="false">
+                <img class="brand-icon brand-icon-mono" src="icons/grok.svg" alt="" aria-hidden="true" />
+                Grok
+              </button>
+              <button class="hub-tab" id="hub-tab-cursor" data-hub-tab="cursor" type="button" role="tab" aria-label="Cursor 上游" aria-controls="cursor-pane" aria-selected="false">
+                <svg class="brand-icon utility-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-5-6-5"/><path d="M12 19h8"/></svg>
+                Cursor
+              </button>
+              <button class="hub-tab" id="hub-tab-agy" data-hub-tab="agy" type="button" role="tab" aria-label="Antigravity 上游" aria-controls="agy-pane" aria-selected="false">
+                <img class="brand-icon" src="icons/antigravity.svg" alt="" aria-hidden="true" />
+                agy
+              </button>
+            </div>
+            <div class="hub-actions">
+              <button class="ghost-btn" id="hub-copy-launch" type="button">复制 Claude 启动命令</button>
+              <button class="ghost-btn" id="hub-public-toggle" type="button" title="启动 ngrok 公网隧道">启动公网</button>
+              <button class="ghost-btn" id="claude-upstream-reload" type="button">重新加载</button>
+              <span class="upstream-action-status" id="claude-upstream-status" role="status" aria-live="polite"></span>
+              <button class="ghost-btn" id="codex-upstream-reload" type="button" hidden>重新加载</button>
+              <span class="upstream-action-status" id="codex-upstream-status" role="status" aria-live="polite" hidden></span>
             </div>
           </div>
 
@@ -118,13 +136,33 @@
             <div class="lan-note" id="codex-upstream-hint"></div>
           </div>
 
+          <div class="hub-pane" id="agy-pane" data-hub-pane="agy" role="tabpanel" aria-labelledby="hub-tab-agy" hidden>
+            <div class="upstream-sources">
+              <div class="upstream-source src-info">
+                <span class="src-icon brand" aria-hidden="true"><img class="brand-icon" src="icons/antigravity.svg" alt="" aria-hidden="true" /></span>
+                <div class="src-main">
+                  <div class="src-name-row">
+                    <strong>Antigravity CLI</strong>
+                    <button class="ghost-btn copy-btn src-copy-btn" type="button" data-copy="agy-cmd" aria-label="复制 agy 启动命令">复制命令</button>
+                  </div>
+                  <div class="src-url">Gemini API · /agy/v1beta</div>
+                  <p class="src-desc hint">在客户端执行以下命令，使用服务端已登录的 Antigravity 账号。</p>
+                  <pre><code id="agy-cmd"></code></pre>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- Grok 页:连接说明 + 命令预览(无上游切换语义) -->
           <div class="hub-pane" id="grok-pane" data-hub-pane="grok" role="tabpanel" aria-labelledby="hub-tab-grok" hidden>
             <div class="upstream-sources">
               <div class="upstream-source src-info">
                 <span class="src-icon brand" aria-hidden="true"><img class="brand-icon brand-icon-mono" src="icons/grok.svg" alt="" /></span>
                 <div class="src-main">
-                  <div class="src-name-row"><strong>Grok CLI</strong></div>
+                  <div class="src-name-row">
+                    <strong>Grok CLI</strong>
+                    <button class="ghost-btn copy-btn src-copy-btn" type="button" data-copy="grok-cmd" aria-label="复制 Grok 启动命令">复制命令</button>
+                  </div>
                   <div class="src-url">环境变量路由到 ferridex 的 /grok/v1</div>
                   <p class="src-desc hint">整条复制执行即可。不要改用 XAI_API_KEY——它会切到 BYOK 模式直连 api.x.ai，绕过代理。</p>
                   <pre><code id="grok-cmd"></code></pre>
@@ -139,7 +177,10 @@
               <div class="upstream-source src-info">
                 <span class="src-icon soft" aria-hidden="true"><svg class="brand-icon utility-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-5-6-5"/><path d="M12 19h8"/></svg></span>
                 <div class="src-main">
-                  <div class="src-name-row"><strong>Cursor CLI</strong></div>
+                  <div class="src-name-row">
+                    <strong>Cursor CLI</strong>
+                    <button class="ghost-btn copy-btn src-copy-btn" type="button" data-copy="cursor-cmd" aria-label="复制 Cursor 启动命令">复制命令</button>
+                  </div>
                   <div class="src-url">agent -e &lt;端点&gt; --auth-token &lt;密钥&gt;</div>
                   <p class="src-desc hint">Cursor CLI 仅在 host 为 localhost 时走自定义端点，ferridex 已自动处理该细节。</p>
                   <pre><code id="cursor-cmd"></code></pre>
@@ -150,7 +191,108 @@
         </div>
       </section>
 
-      <!-- 页 2:Provider 状态(登录态 + 用量查询) -->
+      <!-- 页 2:用量监控(本机订阅配额窗口提前 + Token 统计 + 24h 趋势 + 模型/Provider 明细) -->
+      <section class="console-pane" id="pane-usage" data-console-pane="usage" role="tabpanel" aria-labelledby="console-tab-usage" hidden>
+        <div class="pane-block" id="usage-quota-panel">
+          <div class="block-head">
+            <div>
+              <div class="block-title">本机订阅配额窗口</div>
+              <div class="block-desc">按需查询已登录的本机订阅限额窗口、重置时刻与共享模型（仅点击时请求上游，不自动轮询）</div>
+            </div>
+            <button class="ghost-btn" id="quota-query-all" type="button">查询全部配额</button>
+          </div>
+          <div class="quota-grid" id="usage-quotas"></div>
+        </div>
+
+        <div class="pane-block" id="usage-monitor">
+          <div class="block-head">
+            <div>
+              <div class="block-title">代理 Token 用量监控</div>
+              <div class="block-desc">实时统计经由 ferridex 转发的 Token 消耗、缓存命中率与模型分布（持久化保存在 ~/.ferridex/telemetry.jsonl）</div>
+            </div>
+            <div class="metrics-controls">
+              <div class="seg metrics-window" role="group" aria-label="选择统计时间范围">
+                <button class="seg-btn" type="button" data-metrics-window="today">今日</button>
+                <button class="seg-btn active" type="button" data-metrics-window="24h">24 小时</button>
+                <button class="seg-btn" type="button" data-metrics-window="7d">近 7 天</button>
+                <button class="seg-btn" type="button" data-metrics-window="all">全部</button>
+              </div>
+              <button class="ghost-btn danger-btn" id="metrics-clear" type="button">清空统计</button>
+            </div>
+          </div>
+
+          <div class="kpi-grid" id="usage-kpis"></div>
+
+          <div class="metrics-panel">
+            <div class="metrics-panel-head">
+              <strong>近 24 小时 Token 趋势</strong>
+              <span class="metrics-legend">
+                <span class="legend-item"><i class="swatch swatch-in"></i>输入 / 缓存</span>
+                <span class="legend-item"><i class="swatch swatch-out"></i>输出</span>
+              </span>
+            </div>
+            <div class="hourly-chart" id="usage-hourly"></div>
+          </div>
+
+          <div class="metrics-panel">
+            <div class="metrics-panel-head">
+              <strong>消耗分布明细</strong>
+              <div class="seg" id="usage-group-toggle" role="group" aria-label="选择统计维度">
+                <button class="seg-btn active" type="button" data-usage-group="model">按模型</button>
+                <button class="seg-btn" type="button" data-usage-group="provider">按 Provider</button>
+              </div>
+            </div>
+            <div class="table-wrap" id="usage-breakdown"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 页 3:响应速度(每次对话 TTFT / 解码速度 tok/s / 模型对比) -->
+      <section class="console-pane" id="pane-speed" data-console-pane="speed" role="tabpanel" aria-labelledby="console-tab-speed" hidden>
+        <div class="pane-block" id="speed-monitor">
+          <div class="block-head">
+            <div>
+              <div class="block-title">每次对话 Token 响应速度</div>
+              <div class="block-desc">实时监测每次对话的首字延迟（TTFT）、输出解码速度（tok/s）与总耗时构成</div>
+            </div>
+            <div class="metrics-controls">
+              <div class="seg metrics-window" role="group" aria-label="选择测速时间范围">
+                <button class="seg-btn" type="button" data-metrics-window="today">今日</button>
+                <button class="seg-btn active" type="button" data-metrics-window="24h">24 小时</button>
+                <button class="seg-btn" type="button" data-metrics-window="7d">近 7 天</button>
+                <button class="seg-btn" type="button" data-metrics-window="all">全部</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="kpi-grid" id="speed-kpis"></div>
+
+          <div class="metrics-panel">
+            <div class="metrics-panel-head">
+              <strong>模型平均生成速度对比</strong>
+              <span class="metrics-sub">按解码速度（tok/s）降序，附中位首字延迟（P50 TTFT）</span>
+            </div>
+            <div class="speed-bars" id="speed-model-bars"></div>
+          </div>
+
+          <div class="metrics-panel">
+            <div class="metrics-panel-head">
+              <strong>单次对话速度明细</strong>
+              <div class="client-filter-bar speed-filter-bar" id="speed-provider-filter" role="group" aria-label="按 Provider 筛选对话速度">
+                <button class="filter-pill active" type="button" data-speed-provider="all">全部</button>
+                <button class="filter-pill" type="button" data-speed-provider="claude">Claude</button>
+                <button class="filter-pill" type="button" data-speed-provider="codex">Codex</button>
+                <button class="filter-pill" type="button" data-speed-provider="agy">agy</button>
+                <button class="filter-pill" type="button" data-speed-provider="grok">Grok</button>
+                <button class="filter-pill" type="button" data-speed-provider="cursor">Cursor</button>
+              </div>
+            </div>
+            <div class="table-wrap" id="speed-records"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 页 4:Provider 状态(登录态 + 用量查询) -->
       <section class="console-pane" id="pane-providers" data-console-pane="providers" role="tabpanel" aria-labelledby="console-tab-providers" hidden>
         <div class="pane-block" id="providers">
           <div class="block-head">
@@ -158,6 +300,7 @@
               <div class="block-title">Provider 状态</div>
               <div class="block-desc">本机 CLI 登录情况，每 5 秒自动刷新。点击卡片头可收起</div>
             </div>
+            <button class="ghost-btn" id="cards-toggle-all" type="button">全部收起</button>
           </div>
           <div class="cards" id="cards"></div>
         </div>
@@ -165,54 +308,56 @@
 
       <!-- 页 3:远程访问(SSH 隧道 + ngrok 公网) -->
       <section class="console-pane" id="pane-access" data-console-pane="access" role="tabpanel" aria-labelledby="console-tab-access" hidden>
-        <div class="pane-block" id="tunnel-panel">
-          <div class="block-head">
-            <div>
-              <div class="block-title">SSH 反向隧道</div>
-              <div class="block-desc">把本机代理经 SSH 暴露到远端主机</div>
+        <div class="access-grid">
+          <div class="pane-block access-card" id="tunnel-panel">
+            <div class="block-head">
+              <div>
+                <div class="block-title">SSH 反向隧道</div>
+                <div class="block-desc">把本机代理经 SSH 暴露到远端主机</div>
+              </div>
+              <span class="badge badge-off" id="tun-badge">未运行</span>
             </div>
-            <span class="badge badge-off" id="tun-badge">未运行</span>
+            <div class="tunnel">
+              <div class="trow">
+                <input id="tun-remote" class="inp" placeholder="user@host（远端）" autocomplete="off" spellcheck="false" />
+                <input id="tun-key" class="inp" placeholder="SSH key（默认 ~/.ssh/id_ed25519）" autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="trow">
+                <button id="tun-start" class="solid-btn" type="button">启动</button>
+                <button id="tun-stop" class="ghost-btn" type="button">停止</button>
+                <span class="tinfo" id="tun-info"></span>
+              </div>
+              <div class="lan-note hint">远端只开放需要下游密钥的 AI 接口，不转发本面板与管理 API。启动后可在「客户端」页选择「SSH 远端」。</div>
+              <div class="terr" id="tun-err"></div>
+            </div>
           </div>
-          <div class="tunnel">
-            <div class="trow">
-              <input id="tun-remote" class="inp" placeholder="user@host（远端）" autocomplete="off" spellcheck="false" />
-              <input id="tun-key" class="inp" placeholder="SSH key（默认 ~/.ssh/id_ed25519）" autocomplete="off" spellcheck="false" />
-            </div>
-            <div class="trow">
-              <button id="tun-start" class="solid-btn">启动</button>
-              <button id="tun-stop" class="ghost-btn">停止</button>
-              <span class="tinfo" id="tun-info"></span>
-            </div>
-            <div class="lan-note hint">远端只开放需要下游密钥的 AI 接口，不转发本面板与管理 API。启动后可在「客户端」页选择「SSH 远端」。</div>
-            <div class="terr" id="tun-err"></div>
-          </div>
-        </div>
 
-        <div class="pane-block" id="public-panel">
-          <div class="block-head">
-            <div>
-              <div class="block-title">公网隧道（ngrok）</div>
-              <div class="block-desc">生成带 TLS 的临时公网地址，仅凭密钥保护</div>
+          <div class="pane-block access-card" id="public-panel">
+            <div class="block-head">
+              <div>
+                <div class="block-title">公网隧道（ngrok）</div>
+                <div class="block-desc">生成带 TLS 的临时公网地址，仅凭密钥保护</div>
+              </div>
+              <span class="badge badge-off" id="pub-badge">未运行</span>
             </div>
-            <span class="badge badge-off" id="pub-badge">未运行</span>
-          </div>
-          <div class="tunnel">
-            <div class="trow">
-              <button id="pub-start" class="solid-btn">启动</button>
-              <button id="pub-stop" class="ghost-btn">停止</button>
-              <span class="tinfo" id="pub-info"></span>
+            <div class="tunnel">
+              <div class="trow">
+                <button id="pub-start" class="solid-btn" type="button">启动</button>
+                <button id="pub-stop" class="ghost-btn" type="button">停止</button>
+                <span class="tinfo" id="pub-info"></span>
+              </div>
+              <div class="proxy-url-row" id="pub-url-row" hidden>
+                <span class="name">公网地址</span>
+                <code id="pub-url"></code>
+                <button class="ghost-btn copy-btn" type="button" data-copy="pub-url" aria-label="复制公网地址">复制</button>
+              </div>
+              <div class="lan-note hint">
+                需先安装 <code>ngrok</code>（macOS：<code>brew install ngrok</code>）并配置 authtoken：
+                <code>ngrok config add-authtoken &lt;token&gt;</code>（token 见 dashboard.ngrok.com）。
+                公网地址仅凭密钥保护，请勿泄露；面板本身不对公网开放。
+              </div>
+              <div class="terr" id="pub-err"></div>
             </div>
-            <div class="proxy-url-row" id="pub-url-row" hidden>
-              <span class="name">公网地址</span>
-              <code id="pub-url"></code>
-              <button class="ghost-btn copy-btn" data-copy="pub-url" aria-label="复制公网地址">复制</button>
-            </div>
-            <div class="lan-note hint">
-              需先安装 <code>ngrok</code>（macOS：<code>brew install ngrok</code>）并配置 authtoken：
-              <code>ngrok config add-authtoken &lt;token&gt;</code>（token 见 dashboard.ngrok.com）。
-              公网地址仅凭密钥保护，请勿泄露；面板本身不对公网开放。
-            </div>
-            <div class="terr" id="pub-err"></div>
           </div>
         </div>
       </section>
@@ -223,7 +368,7 @@
           <div class="block-head">
             <div>
               <div class="block-title">接入端点</div>
-              <div class="block-desc">各客户端请求实际指向的地址</div>
+              <div class="block-desc">各客户端请求实际指向的地址，点击右侧可一键复制</div>
             </div>
           </div>
           <div class="endpoints" id="endpoints"></div>
@@ -236,21 +381,30 @@
               <div class="block-desc">按本机、SSH 远端或公网隧道生成可直接复制的配置</div>
             </div>
             <div class="seg target-toggle" id="target-toggle" role="group" aria-label="选择客户端连接目标" hidden>
-              <button class="seg-btn active" data-target="local">本地 / 局域网</button>
-              <button class="seg-btn" id="target-ssh" data-target="ssh" hidden>SSH 远端</button>
-              <button class="seg-btn" id="target-public" data-target="public" hidden>公网</button>
+              <button class="seg-btn active" type="button" data-target="local">本地 / 局域网</button>
+              <button class="seg-btn" id="target-ssh" type="button" data-target="ssh" hidden>SSH 远端</button>
+              <button class="seg-btn" id="target-public" type="button" data-target="public" hidden>公网</button>
             </div>
           </div>
 
           <div class="proxy-url-row">
             <span class="name">代理地址</span>
             <code id="proxy-url"></code>
-            <button class="ghost-btn copy-btn" data-copy="proxy-url" aria-label="复制代理地址">复制</button>
+            <button class="ghost-btn copy-btn" type="button" data-copy="proxy-url" aria-label="复制代理地址">复制</button>
           </div>
           <div class="lan-info" id="lan-info"></div>
 
+          <div class="client-filter-bar" id="client-filter" role="group" aria-label="按客户端筛选">
+            <button class="filter-pill active" type="button" data-client-filter="all">全部</button>
+            <button class="filter-pill" type="button" data-client-filter="claude">Claude Code</button>
+            <button class="filter-pill" type="button" data-client-filter="codex">Codex</button>
+            <button class="filter-pill" type="button" data-client-filter="cursor">Cursor CLI</button>
+            <button class="filter-pill" type="button" data-client-filter="agy">Antigravity CLI</button>
+            <button class="filter-pill" type="button" data-client-filter="grok">Grok CLI</button>
+          </div>
+
           <!-- Claude Code：一键启动 / 默认配置 分开 -->
-          <div class="client-group">
+          <div class="client-group" data-client-group="claude">
             <div class="client-label"><img class="brand-icon" src="icons/claude.svg" alt="" aria-hidden="true" />Claude Code</div>
 
             <div class="config-block compact">
@@ -260,7 +414,7 @@
                   <span class="lang-tag">shell</span>
                   <span class="config-note">无需修改 settings.json，直接在远端启动</span>
                 </div>
-                <button class="ghost-btn copy-btn" data-copy="claude-launch" aria-label="复制 Claude 一键启动命令">一键复制</button>
+                <button class="ghost-btn copy-btn" type="button" data-copy="claude-launch" aria-label="复制 Claude 一键启动命令">一键复制</button>
               </div>
               <pre><code id="claude-launch"></code></pre>
             </div>
@@ -273,14 +427,14 @@
                   <span class="lang-tag">JSON</span>
                   <code>~/.claude/settings.json</code>
                 </div>
-                <button class="ghost-btn copy-btn" data-copy="claude-config" aria-label="复制 Claude Code 配置">一键复制</button>
+                <button class="ghost-btn copy-btn" type="button" data-copy="claude-config" aria-label="复制 Claude Code 配置">一键复制</button>
               </div>
               <div class="config-body"><pre><code id="claude-config"></code></pre></div>
             </div>
           </div>
 
           <!-- Codex：一键启动 / 默认配置 / 启动前执行 分开 -->
-          <div class="client-group">
+          <div class="client-group" data-client-group="codex">
             <div class="client-label"><img class="brand-icon brand-icon-mono" src="icons/openai.svg" alt="" aria-hidden="true" />Codex</div>
 
             <div class="config-block compact">
@@ -290,7 +444,7 @@
                   <span class="lang-tag">shell</span>
                   <span class="config-note">无需修改 config.toml，直接在远端启动</span>
                 </div>
-                <button class="ghost-btn copy-btn" data-copy="codex-launch" aria-label="复制 Codex 一键启动命令">一键复制</button>
+                <button class="ghost-btn copy-btn" type="button" data-copy="codex-launch" aria-label="复制 Codex 一键启动命令">一键复制</button>
               </div>
               <pre><code id="codex-launch"></code></pre>
             </div>
@@ -303,7 +457,7 @@
                   <span class="lang-tag">TOML</span>
                   <code>~/.codex/config.toml</code>
                 </div>
-                <button class="ghost-btn copy-btn" data-copy="codex-config" aria-label="复制 Codex 配置">一键复制</button>
+                <button class="ghost-btn copy-btn" type="button" data-copy="codex-config" aria-label="复制 Codex 配置">一键复制</button>
               </div>
               <div class="config-body"><pre><code id="codex-config"></code></pre></div>
             </div>
@@ -315,14 +469,14 @@
                   <span class="lang-tag">shell</span>
                   <span class="config-note">为客户端提供 ferridex 下游访问凭据</span>
                 </div>
-                <button class="ghost-btn copy-btn" data-copy="codex-env" aria-label="复制启动环境变量">一键复制</button>
+                <button class="ghost-btn copy-btn" type="button" data-copy="codex-env" aria-label="复制启动环境变量">一键复制</button>
               </div>
               <pre><code id="codex-env"></code></pre>
             </div>
           </div>
 
           <!-- Cursor CLI -->
-          <div class="client-group">
+          <div class="client-group" data-client-group="cursor">
             <div class="client-label"><svg class="brand-icon utility-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-5-6-5"/><path d="M12 19h8"/></svg>Cursor CLI</div>
 
             <div class="config-block compact">
@@ -332,14 +486,30 @@
                   <span class="lang-tag">shell</span>
                   <span class="config-note">远程 shell 启动前执行</span>
                 </div>
-                <button class="ghost-btn copy-btn" data-copy="cursor-config" aria-label="复制 Cursor CLI 配置">一键复制</button>
+                <button class="ghost-btn copy-btn" type="button" data-copy="cursor-config" aria-label="复制 Cursor CLI 配置">一键复制</button>
               </div>
               <pre><code id="cursor-config"></code></pre>
             </div>
           </div>
 
+          <!-- Antigravity CLI -->
+          <div class="client-group" data-client-group="agy">
+            <div class="client-label"><img class="brand-icon" src="icons/antigravity.svg" alt="" aria-hidden="true" />Antigravity CLI</div>
+            <div class="config-block compact">
+              <div class="config-head">
+                <div>
+                  <strong>一键启动</strong>
+                  <span class="lang-tag">shell</span>
+                  <span class="config-note">在运行 agy 的客户端执行</span>
+                </div>
+                <button class="ghost-btn copy-btn" type="button" data-copy="agy-launch" aria-label="复制 agy 启动命令">一键复制</button>
+              </div>
+              <pre><code id="agy-launch"></code></pre>
+            </div>
+          </div>
+
           <!-- Grok CLI -->
-          <div class="client-group">
+          <div class="client-group" data-client-group="grok">
             <div class="client-label"><img class="brand-icon brand-icon-mono" src="icons/grok.svg" alt="" aria-hidden="true" />Grok CLI</div>
 
             <div class="config-block compact">
@@ -349,7 +519,7 @@
                   <span class="lang-tag">shell</span>
                   <span class="config-note">整条复制执行（勿用 XAI_API_KEY，会绕过代理）</span>
                 </div>
-                <button class="ghost-btn copy-btn" data-copy="grok-launch" aria-label="复制 Grok CLI 配置">一键复制</button>
+                <button class="ghost-btn copy-btn" type="button" data-copy="grok-launch" aria-label="复制 Grok CLI 配置">一键复制</button>
               </div>
               <pre><code id="grok-launch"></code></pre>
             </div>
@@ -365,25 +535,28 @@
               <div class="block-title">实时日志</div>
               <div class="block-desc">代理请求流，通过 SSE 实时推送</div>
             </div>
-            <span class="livedot" id="livedot" title="日志流" aria-hidden="true"></span>
+            <span class="livedot" id="livedot" title="日志流连接状态" aria-hidden="true"></span>
           </div>
           <div class="log-console">
             <div class="log-toolbar">
-              <div class="seg" role="group" aria-label="按状态码筛选">
-                <button class="seg-btn active" data-filter="all">全部</button>
-                <button class="seg-btn" data-filter="2">2xx</button>
-                <button class="seg-btn" data-filter="4">4xx</button>
-                <button class="seg-btn" data-filter="5">5xx</button>
+              <div class="log-filters">
+                <div class="seg" role="group" aria-label="按状态码筛选">
+                  <button class="seg-btn active" type="button" data-filter="all">全部</button>
+                  <button class="seg-btn" type="button" data-filter="2">2xx</button>
+                  <button class="seg-btn" type="button" data-filter="4">4xx</button>
+                  <button class="seg-btn" type="button" data-filter="5">5xx</button>
+                </div>
+                <input id="log-search" class="log-search" type="search" placeholder="筛选路径 / 方法…" autocomplete="off" spellcheck="false" aria-label="按关键词筛选日志" />
               </div>
               <div class="log-actions">
-                <button class="chip" id="log-pause" aria-pressed="false">暂停滚动</button>
-                <button class="chip" id="log-clear">清空</button>
+                <button class="chip" id="log-pause" type="button" aria-pressed="false">暂停滚动</button>
+                <button class="chip" id="log-clear" type="button">清空</button>
                 <span class="log-count" id="log-count" title="本次会话累计 / 当前显示">0 / 0</span>
               </div>
             </div>
             <div class="log-wrap">
               <div class="log-body" id="log"></div>
-              <button class="new-logs" id="new-logs" hidden>↓ <span id="new-count">0</span> 条新日志</button>
+              <button class="new-logs" id="new-logs" type="button" hidden>↓ <span id="new-count">0</span> 条新日志</button>
             </div>
           </div>
         </div>

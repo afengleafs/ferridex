@@ -471,3 +471,24 @@ func (p *ClaudeUpstreamProvider) QueryUsage(ctx context.Context) ([]UsageWindow,
 	}
 	return querier.QueryUsage(ctx)
 }
+
+// QueryUsageReport delegates detailed subscription quota queries when the
+// built-in Anthropic subscription is active.
+func (p *ClaudeUpstreamProvider) QueryUsageReport(ctx context.Context) (UsageReport, error) {
+	source, selected := p.selected()
+	if source != ClaudeUpstreamSubscription {
+		return UsageReport{}, ErrClaudeUsageUnavailable
+	}
+	if dq, ok := selected.(UsageDetailQuerier); ok {
+		return dq.QueryUsageReport(ctx)
+	}
+	querier, ok := selected.(UsageQuerier)
+	if !ok {
+		return UsageReport{}, errors.New("active subscription does not support usage queries")
+	}
+	windows, err := querier.QueryUsage(ctx)
+	if err != nil {
+		return UsageReport{}, err
+	}
+	return UsageReport{Windows: windows}, nil
+}

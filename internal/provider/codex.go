@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -772,7 +773,27 @@ func (c *CodexProvider) QueryUsage(ctx context.Context) ([]UsageWindow, error) {
 	return c.usageFetcher(ctx)
 }
 
+func (c *CodexProvider) QueryUsageReport(ctx context.Context) (UsageReport, error) {
+	body, err := c.fetchUsageRaw(ctx)
+	if err != nil {
+		return UsageReport{}, err
+	}
+	report, ok := parseCodexUsageReport(body)
+	if !ok {
+		return UsageReport{}, errors.New("usage: unrecognized response shape")
+	}
+	return report, nil
+}
+
 func (c *CodexProvider) fetchUsage(ctx context.Context) ([]UsageWindow, error) {
+	report, err := c.QueryUsageReport(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return report.Windows, nil
+}
+
+func (c *CodexProvider) fetchUsageRaw(ctx context.Context) ([]byte, error) {
 	token, accountID, err := codexUsageCreds()
 	if err != nil {
 		return nil, err
@@ -798,11 +819,7 @@ func (c *CodexProvider) fetchUsage(ctx context.Context) ([]UsageWindow, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("usage HTTP %d: %s", resp.StatusCode, util.Truncate(string(body), 300))
 	}
-	windows, ok := parseCodexUsage(body)
-	if !ok {
-		return nil, errors.New("usage: unrecognized response shape")
-	}
-	return windows, nil
+	return body, nil
 }
 
 // codexUsageCreds reads the access token + account id from auth.json without
@@ -833,36 +850,160 @@ func codexUsageCreds() (token, accountID string, err error) {
 }
 
 type codexUsageWindow struct {
-	UsedPercent float64 `json:"used_percent"`
-	ResetAt     int64   `json:"reset_at"`
+	UsedPercent        float64 `json:"used_percent"`
+	LimitWindowSeconds int64   `json:"limit_window_seconds"`
+	ResetAfterSeconds  int64   `json:"reset_after_seconds"`
+	ResetAt            int64   `json:"reset_at"`
 }
 
-// parseCodexUsage maps the wham/usage response into display windows. used_percent
-// is a 0..100 percentage; reset_at is a unix timestamp (seconds, sometimes ms).
+type codexRateLimit struct {
+	Allowed      *bool             `json:"allowed"`
+	LimitReached bool              `json:"limit_reached"`
+	Primary      *codexUsageWindow `json:"primary_window"`
+	Secondary    *codexUsageWindow `json:"secondary_window"`
+}
+
+type codexAdditionalLimit struct {
+	LimitName  string          `json:"limit_name"`
+	RateLimit  *codexRateLimit `json:"rate_limit"`
+}
+
+// parseCodexUsage maps the wham/usage response into display windows.
 func parseCodexUsage(body []byte) ([]UsageWindow, bool) {
+	rep, ok := parseCodexUsageReport(body)
+	if !ok {
+		return nil, false
+	}
+	return rep.Windows, true
+}
+
+func parseCodexUsageReport(body []byte) (UsageReport, bool) {
 	var doc struct {
-		RateLimit struct {
-			Primary   *codexUsageWindow `json:"primary_window"`
-			Secondary *codexUsageWindow `json:"secondary_window"`
-		} `json:"rate_limit"`
+		Email                string                 `json:"email"`
+		PlanType             string                 `json:"plan_type"`
+		RateLimit            codexRateLimit         `json:"rate_limit"`
+		CodeReviewRateLimit  *codexRateLimit        `json:"code_review_rate_limit"`
+		AdditionalRateLimits []codexAdditionalLimit `json:"additional_rate_limits"`
+		Credits              *struct {
+			HasCredits          bool   `json:"has_credits"`
+			Unlimited           bool   `json:"unlimited"`
+			OverageLimitReached bool   `json:"overage_limit_reached"`
+			Balance             string `json:"balance"`
+		} `json:"credits"`
+		ResetCredits *struct {
+			AvailableCount           int `json:"available_count"`
+			ApplicableAvailableCount int `json:"applicable_available_count"`
+		} `json:"rate_limit_reset_credits"`
+		ModelUsage map[string]struct {
+			Available bool `json:"available"`
+		} `json:"model_usage"`
 	}
 	if json.Unmarshal(body, &doc) != nil {
-		return nil, false
+		return UsageReport{}, false
 	}
-	out := make([]UsageWindow, 0, 2)
+
+	out := make([]UsageWindow, 0, 4)
 	if w := doc.RateLimit.Primary; w != nil {
-		out = append(out, w.usageWindow("5 小时"))
+		out = append(out, w.usageWindow(formatCodexWindowLabel(w.LimitWindowSeconds, "5 小时"), "主限额"))
 	}
 	if w := doc.RateLimit.Secondary; w != nil {
-		out = append(out, w.usageWindow("每周"))
+		out = append(out, w.usageWindow(formatCodexWindowLabel(w.LimitWindowSeconds, "每周"), "主限额"))
+	}
+	if doc.CodeReviewRateLimit != nil {
+		if w := doc.CodeReviewRateLimit.Primary; w != nil {
+			out = append(out, w.usageWindow("Code Review · "+formatCodexWindowLabel(w.LimitWindowSeconds, "主窗口"), "附加限额"))
+		}
+		if w := doc.CodeReviewRateLimit.Secondary; w != nil {
+			out = append(out, w.usageWindow("Code Review · "+formatCodexWindowLabel(w.LimitWindowSeconds, "周窗口"), "附加限额"))
+		}
+	}
+	for _, add := range doc.AdditionalRateLimits {
+		if add.RateLimit == nil {
+			continue
+		}
+		prefix := strings.TrimSpace(add.LimitName)
+		if prefix == "" {
+			prefix = "扩展"
+		}
+		if w := add.RateLimit.Primary; w != nil {
+			out = append(out, w.usageWindow(prefix+" · "+formatCodexWindowLabel(w.LimitWindowSeconds, "短窗口"), "模型专属"))
+		}
+		if w := add.RateLimit.Secondary; w != nil {
+			out = append(out, w.usageWindow(prefix+" · "+formatCodexWindowLabel(w.LimitWindowSeconds, "长窗口"), "模型专属"))
+		}
 	}
 	if len(out) == 0 {
-		return nil, false
+		return UsageReport{}, false
 	}
-	return out, true
+
+	rep := UsageReport{
+		Account: strings.TrimSpace(doc.Email),
+		Windows: out,
+	}
+	if pt := strings.TrimSpace(doc.PlanType); pt != "" {
+		rep.Plan = "ChatGPT " + strings.ToUpper(pt[:1]) + pt[1:]
+	}
+	if doc.RateLimit.LimitReached || (doc.RateLimit.Allowed != nil && !*doc.RateLimit.Allowed) {
+		rep.Status = "已达限额"
+	} else if doc.RateLimit.Allowed != nil && *doc.RateLimit.Allowed {
+		rep.Status = "正常可用"
+	}
+
+	if doc.Credits != nil {
+		if doc.Credits.Unlimited {
+			rep.Extras = append(rep.Extras, UsageExtra{Label: "扩展额度", Value: "无限制", Tone: "ok"})
+		} else if doc.Credits.HasCredits || (doc.Credits.Balance != "" && doc.Credits.Balance != "0") {
+			tone := ""
+			if doc.Credits.OverageLimitReached {
+				tone = "warn"
+			}
+			rep.Extras = append(rep.Extras, UsageExtra{Label: "额度余额", Value: doc.Credits.Balance, Tone: tone})
+		}
+	}
+	if doc.ResetCredits != nil && doc.ResetCredits.AvailableCount > 0 {
+		rep.Extras = append(rep.Extras, UsageExtra{
+			Label: "限额重置卡",
+			Value: fmt.Sprintf("%d 张可用", doc.ResetCredits.AvailableCount),
+			Tone:  "ok",
+		})
+	}
+	if len(doc.ModelUsage) > 0 {
+		names := make([]string, 0, len(doc.ModelUsage))
+		for k := range doc.ModelUsage {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, k := range names {
+			st := "暂不可用"
+			tone := "warn"
+			if doc.ModelUsage[k].Available {
+				st = "可用"
+				tone = "ok"
+			}
+			rep.Extras = append(rep.Extras, UsageExtra{Label: k, Value: st, Tone: tone})
+		}
+	}
+	return rep, true
 }
 
-func (w codexUsageWindow) usageWindow(label string) UsageWindow {
+func formatCodexWindowLabel(sec int64, fallback string) string {
+	if sec <= 0 {
+		return fallback
+	}
+	if sec%86400 == 0 {
+		days := sec / 86400
+		if days == 7 {
+			return "每周"
+		}
+		return fmt.Sprintf("%d 天", days)
+	}
+	if sec%3600 == 0 {
+		return fmt.Sprintf("%d 小时", sec/3600)
+	}
+	return fallback
+}
+
+func (w codexUsageWindow) usageWindow(label, group string) UsageWindow {
 	frac := w.UsedPercent / 100
 	if frac < 0 {
 		frac = 0
@@ -877,5 +1018,11 @@ func (w codexUsageWindow) usageWindow(label string) UsageWindow {
 	if reset < 0 {
 		reset = 0
 	}
-	return UsageWindow{Label: label, Utilization: frac, ResetsAt: reset}
+	return UsageWindow{
+		Label:         label,
+		Utilization:   frac,
+		ResetsAt:      reset,
+		WindowSeconds: w.LimitWindowSeconds,
+		Group:         group,
+	}
 }

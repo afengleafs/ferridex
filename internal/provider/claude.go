@@ -514,7 +514,27 @@ func (c *ClaudeProvider) QueryUsage(ctx context.Context) ([]UsageWindow, error) 
 	return c.usageFetcher(ctx)
 }
 
+func (c *ClaudeProvider) QueryUsageReport(ctx context.Context) (UsageReport, error) {
+	body, err := c.fetchUsageRaw(ctx)
+	if err != nil {
+		return UsageReport{}, err
+	}
+	rep, ok := parseClaudeUsageReport(body)
+	if !ok {
+		return UsageReport{}, errors.New("usage: unrecognized response shape")
+	}
+	return rep, nil
+}
+
 func (c *ClaudeProvider) fetchUsage(ctx context.Context) ([]UsageWindow, error) {
+	rep, err := c.QueryUsageReport(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return rep.Windows, nil
+}
+
+func (c *ClaudeProvider) fetchUsageRaw(ctx context.Context) ([]byte, error) {
 	token, err := c.getAccessToken(ctx)
 	if err != nil {
 		return nil, err
@@ -540,45 +560,102 @@ func (c *ClaudeProvider) fetchUsage(ctx context.Context) ([]UsageWindow, error) 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("usage HTTP %d: %s", resp.StatusCode, util.Truncate(string(body), 300))
 	}
-	windows, ok := parseClaudeUsage(body)
-	if !ok {
-		return nil, errors.New("usage: unrecognized response shape")
-	}
-	return windows, nil
+	return body, nil
 }
 
-// parseClaudeUsage maps the /api/oauth/usage response into display windows. The
-// endpoint is undocumented, so parse defensively: tolerate a 0..1 fraction or a
-// 0..100 percentage, and a reset given as an ISO-8601 string or a unix epoch.
+// parseClaudeUsage maps the /api/oauth/usage response into display windows.
 func parseClaudeUsage(body []byte) ([]UsageWindow, bool) {
-	var doc map[string]any
-	if json.Unmarshal(body, &doc) != nil {
+	rep, ok := parseClaudeUsageReport(body)
+	if !ok {
 		return nil, false
 	}
-	windows := []struct{ key, label string }{
-		{"five_hour", "5 小时"},
-		{"seven_day", "7 天"},
+	return rep.Windows, true
+}
+
+func parseClaudeUsageReport(body []byte) (UsageReport, bool) {
+	var doc map[string]any
+	if json.Unmarshal(body, &doc) != nil {
+		return UsageReport{}, false
 	}
-	out := make([]UsageWindow, 0, len(windows))
+	windows := []struct {
+		key, label, group string
+		windowSec         int64
+	}{
+		{"five_hour", "5 小时", "主限额", 5 * 3600},
+		{"seven_day", "7 天", "主限额", 7 * 86400},
+		{"seven_day_sonnet", "7 天 · Sonnet", "模型专属", 7 * 86400},
+		{"seven_day_opus", "7 天 · Opus", "模型专属", 7 * 86400},
+		{"seven_day_oauth_apps", "7 天 · OAuth 应用", "附加限额", 7 * 86400},
+	}
+	out := make([]UsageWindow, 0, len(windows)+1)
+	maxUtil := 0.0
 	for _, w := range windows {
 		win, ok := util.GetMap(doc, w.key)
 		if !ok {
 			continue
 		}
-		util, ok := claudeUsageFraction(win["utilization"])
+		u, ok := claudeUsageFraction(win["utilization"])
 		if !ok {
 			continue
 		}
+		if u > maxUtil {
+			maxUtil = u
+		}
 		out = append(out, UsageWindow{
-			Label:       w.label,
-			Utilization: util,
-			ResetsAt:    claudeUsageReset(win["resets_at"]),
+			Label:         w.label,
+			Utilization:   u,
+			ResetsAt:      claudeUsageReset(win["resets_at"]),
+			WindowSeconds: w.windowSec,
+			Group:         w.group,
 		})
 	}
-	if len(out) == 0 {
-		return nil, false
+
+	var extras []UsageExtra
+	if extra, ok := util.GetMap(doc, "extra_usage"); ok {
+		enabled, _ := extra["is_enabled"].(bool)
+		used, hasUsed := toFloat(extra["used_credits"])
+		limit, hasLimit := toFloat(extra["monthly_limit"])
+		u, hasUtil := claudeUsageFraction(extra["utilization"])
+		if !hasUtil && hasUsed && hasLimit && limit > 0 {
+			u = used / limit
+			if u > 1 {
+				u = 1
+			}
+			hasUtil = true
+		}
+		if enabled {
+			detail := ""
+			if hasUsed && hasLimit && limit > 0 {
+				// Anthropic returns credits in cents in some payloads; show cleanly.
+				detail = fmt.Sprintf("%.2f / %.2f", used/100, limit/100)
+			}
+			if hasUtil {
+				out = append(out, UsageWindow{
+					Label:       "额外用量 (Extra Usage)",
+					Utilization: u,
+					Detail:      detail,
+					Group:       "按量扩展",
+				})
+			}
+			extras = append(extras, UsageExtra{Label: "额外用量", Value: "已开启", Tone: "ok"})
+		} else {
+			extras = append(extras, UsageExtra{Label: "额外用量", Value: "未开启"})
+		}
 	}
-	return out, true
+
+	if len(out) == 0 {
+		return UsageReport{}, false
+	}
+	status := "正常可用"
+	if maxUtil >= 1 {
+		status = "已达限额"
+	}
+	return UsageReport{
+		Plan:    "Claude 订阅",
+		Status:  status,
+		Extras:  extras,
+		Windows: out,
+	}, true
 }
 
 // claudeUsageFraction normalizes a utilization value to a 0..1 fraction.

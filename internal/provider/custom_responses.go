@@ -613,3 +613,24 @@ func (p *ResponsesProvider) QueryUsage(ctx context.Context) ([]UsageWindow, erro
 	}
 	return querier.QueryUsage(ctx)
 }
+
+// QueryUsageReport delegates detailed subscription quota queries when the
+// built-in ChatGPT subscription is active.
+func (p *ResponsesProvider) QueryUsageReport(ctx context.Context) (UsageReport, error) {
+	source, selected := p.selected()
+	if source != ResponsesSourceSubscription {
+		return UsageReport{}, ErrResponsesUsageUnavailable
+	}
+	if dq, ok := selected.(UsageDetailQuerier); ok {
+		return dq.QueryUsageReport(ctx)
+	}
+	querier, ok := selected.(UsageQuerier)
+	if !ok {
+		return UsageReport{}, errors.New("active subscription does not support usage queries")
+	}
+	windows, err := querier.QueryUsage(ctx)
+	if err != nil {
+		return UsageReport{}, err
+	}
+	return UsageReport{Windows: windows}, nil
+}

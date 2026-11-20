@@ -2,7 +2,7 @@
 
 **English** | [中文](README.zh.md)
 
-`ferridex` is a local Go proxy that reuses already-logged-in ChatGPT/Codex, Claude Code, Cursor CLI, and Grok CLI subscriptions, and exposes compatible APIs to this machine or to remote hosts connected over an SSH tunnel.
+`ferridex` is a local Go proxy that reuses already-logged-in ChatGPT/Codex, Claude Code, Cursor CLI, Grok CLI, and Antigravity CLI subscriptions, and exposes compatible APIs to this machine or to remote hosts connected over an SSH tunnel.
 
 > This project calls unofficial upstream endpoints and reads local login credentials. It is for personal research and personal use only.
 > Do not share or resell the proxy. For public-network access, use the dashboard ngrok tunnel (a key is required, and the dashboard is not exposed).
@@ -11,7 +11,7 @@
 ## Build
 
 - Go 1.23 or later
-- A completed subscription login for Codex CLI, Claude Code, Cursor CLI, and/or Grok CLI (as needed)
+- A completed subscription login for Codex CLI, Claude Code, Cursor CLI, Grok CLI, and/or agy (as needed)
 - Local `ssh` plus a passwordless key (or `ssh-agent`) if you manage reverse tunnels from the dashboard
 
 ```bash
@@ -27,7 +27,7 @@ After pulling source changes, rebuild and restart the process. `go build ./...` 
 ## Start
 
 ```bash
-# Start Codex, Claude, Cursor, Grok, and the web dashboard; open a browser
+# Start Codex, Claude, Cursor, Grok, agy, and the web dashboard; open a browser
 ferridex serve
 
 # Pin the port / skip opening a browser / pick the next free port
@@ -43,6 +43,7 @@ ferridex codex
 ferridex claude
 ferridex cursor
 ferridex grok
+ferridex agy
 
 # Check local login status
 ferridex status
@@ -118,6 +119,30 @@ Once a local or remote client points at ferridex, downstream credentials are rep
   A separate `GROK_HOME` keeps this from rewriting the real `~/.grok` login (`auth_provider_command` mutates `auth.json` on refresh). The opening `rm` is required because grok caches the downstream token; after switching SSH↔LAN or rotating the key, a stale cache yields `401`.
 
 The dashboard **Remote client config** card generates these commands for the current target and key, ready to copy.
+
+## Antigravity CLI (agy)
+
+Sign in with agy on the server. Start the gateway with `ferridex serve`, or run only this provider with `ferridex agy`. Copy the client command from the dashboard for the selected target and downstream key.
+
+```bash
+export GEMINI_API_KEY='<Ferridex downstream key>'
+export GOOGLE_GEMINI_BASE_URL='http://127.0.0.1:8788/agy'
+curl -fsS -H "x-goog-api-key: $GEMINI_API_KEY" "$GOOGLE_GEMINI_BASE_URL/v1beta/models"
+agy --settings '{"modelProvider":"gemini"}'
+```
+
+For the Python Gemini SDK, select a model ID from the model list.
+
+```python
+import os
+from google import genai
+
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={
+    "base_url": os.environ["GOOGLE_GEMINI_BASE_URL"], "api_version": "v1beta",
+})
+model = next(iter(client.models.list())).name
+print(client.models.generate_content(model=model, contents="Hello").text)
+```
 
 ## SSH reverse tunnel
 

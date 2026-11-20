@@ -12,6 +12,7 @@ function escapeHTML(value) {
 }
 
 const BRAND_ICON_PATHS = {
+  agy: { src: "icons/antigravity.svg", mono: false },
   claude: { src: "icons/claude.svg", mono: false },
   codex: { src: "icons/openai.svg", mono: true },
   grok: { src: "icons/grok.svg", mono: true },
@@ -284,11 +285,33 @@ requires_openai_auth = false`;
   // 避免切换 SSH↔LAN 或换密钥后 grok 复用旧缓存 token 导致 401。
   $("#grok-launch").textContent =
     `rm -f $HOME/.grok-ferridex/auth.json; export GROK_HOME=$HOME/.grok-ferridex GROK_CLI_CHAT_PROXY_BASE_URL=${baseURL}/grok/v1 GROK_AUTH_PROVIDER_COMMAND='echo ${token}' GROK_AUTH_TOKEN_TTL=3600; grok`;
-  // 上游页 Grok/Cursor 标签的命令预览与「客户端」页保持一致。
+  // 上游页 Grok/Cursor/agy 标签的命令预览与当前快捷复制目标保持一致。
+  const agyLaunch = `GEMINI_API_KEY=${shellSingleQuote(token)} GOOGLE_GEMINI_BASE_URL=${shellSingleQuote(baseURL + "/agy")} agy --settings '{"modelProvider":"gemini"}'`;
+  $("#agy-launch").textContent = agyLaunch;
+  $("#agy-cmd").textContent = agyLaunch;
   const grokPreview = $("#grok-cmd");
   if (grokPreview) grokPreview.textContent = $("#grok-launch").textContent;
   const cursorPreview = $("#cursor-cmd");
   if (cursorPreview) cursorPreview.textContent = $("#cursor-config").textContent;
+  syncHubRoutePill();
+}
+
+function syncHubRoutePill() {
+  const pill = $("#hub-route-pill");
+  if (!pill) return;
+  pill.classList.remove("is-public", "is-lan");
+  if (pub.running && pub.url) {
+    pill.textContent = "快捷目标：公网";
+    pill.classList.add("is-public");
+    pill.title = `快捷复制将使用公网地址：${pub.url}`;
+  } else if (netinfo.lan_enabled && netinfo.lan_ips && netinfo.lan_ips.length) {
+    pill.textContent = `快捷目标：局域网 (${netinfo.lan_ips[0]})`;
+    pill.classList.add("is-lan");
+    pill.title = "快捷复制将使用局域网地址";
+  } else {
+    pill.textContent = "快捷目标：本机";
+    pill.title = "快捷复制将使用本机回环地址";
+  }
 }
 
 // 按指定路由模式临时生成客户端配置并取其中一段(上游页「一键复制」用)。
@@ -315,11 +338,12 @@ async function loadNetinfo() {
 }
 
 /* ===== 上游切换中心:Claude / Codex / Grok / Cursor 标签页 ===== */
-const HUB_TABS = ["claude", "codex", "grok", "cursor"];
+const HUB_TABS = ["claude", "codex", "grok", "cursor", "agy"];
 const HUB_COPY_LABELS = {
   claude: "复制 Claude 启动命令",
   codex: "复制 Codex 启动命令",
   grok: "复制 Grok 启动命令",
+  agy: "复制 agy 启动命令",
   cursor: "复制 Cursor 启动命令",
 };
 // 一键复制读取的命令元素(与「客户端」页生成的一一对应)。
@@ -327,6 +351,7 @@ const HUB_COPY_TARGETS = {
   claude: "#claude-launch",
   codex: "#codex-launch",
   grok: "#grok-launch",
+  agy: "#agy-launch",
   cursor: "#cursor-config",
 };
 
@@ -807,15 +832,21 @@ function fmtCountdown(ms) {
 
 function tickCountdown() {
   const now = Date.now();
+  let activeCount = 0;
   countdowns.forEach((c) => {
     const el = document.getElementById(c.id);
     if (!el) return;
     const span = el.querySelector(".health-countdown");
     const txt = fmtCountdown(c.resetMs - now);
+    if (txt) activeCount++;
     if (span) {
-      span.textContent = txt || "";
+      span.textContent = txt ? (c.prefix ? c.prefix + txt : txt) : "";
     }
   });
+  if (activeCount === 0 && countdownTimer) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
 }
 
 function setHealth(state, text, countdownMs) {
@@ -857,23 +888,109 @@ function fmtResetIn(resetsAt) {
   return `${Math.round(s)} 秒后重置`;
 }
 
-function usageBar(u) {
+function fmtPct(frac) {
+  const pct = frac * 100;
+  if (Math.abs(pct - Math.round(pct)) < 0.05) return `${Math.round(pct)}%`;
+  return `${pct.toFixed(1)}%`;
+}
+
+function fmtResetClock(resetsAt) {
+  if (!resetsAt) return "";
+  const d = new Date(resetsAt * 1000);
+  const now = new Date();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) return `今日 ${hh}:${mm}`;
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  const isTomorrow =
+    d.getFullYear() === tomorrow.getFullYear() &&
+    d.getMonth() === tomorrow.getMonth() &&
+    d.getDate() === tomorrow.getDate();
+  if (isTomorrow) return `明日 ${hh}:${mm}`;
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const da = String(d.getDate()).padStart(2, "0");
+  return `${mo}-${da} ${hh}:${mm}`;
+}
+
+function fmtTimeClock(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  return [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map((n) => String(n).padStart(2, "0"))
+    .join(":");
+}
+
+function usageBar(u, detailed) {
   const frac = Math.max(0, Math.min(1, u.utilization || 0));
-  const pct = Math.round(frac * 100);
-  const reset = fmtResetIn(u.resets_at);
+  const remFrac = Math.max(0, 1 - frac);
+  const pctWidth = Math.round(frac * 1000) / 10;
+  const resetIn = fmtResetIn(u.resets_at);
+  const resetClock = fmtResetClock(u.resets_at);
+
+  let paceMarker = "";
+  let paceTag = "";
+  if (detailed && u.window_seconds > 0 && u.resets_at > 0) {
+    const remSec = u.resets_at - Date.now() / 1000;
+    if (remSec > 0 && remSec <= u.window_seconds) {
+      const elapsedFrac = Math.max(0, Math.min(1, 1 - remSec / u.window_seconds));
+      const elapsedPct = Math.round(elapsedFrac * 100);
+      paceMarker = `<span class="bar-pace" style="left:${elapsedPct}%" title="当前窗口时间已过 ${elapsedPct}%"></span>`;
+      if (elapsedFrac >= 0.05 && elapsedFrac <= 0.98) {
+        if (frac - elapsedFrac >= 0.15) {
+          paceTag = `<span class="quota-chip warn" title="已用比例高于窗口时间进度">消耗偏快</span>`;
+        } else if (frac <= elapsedFrac + 0.05) {
+          paceTag = `<span class="quota-chip ok" title="已用比例低于或持平窗口时间进度">节奏健康</span>`;
+        }
+      }
+    }
+  }
+
+  const resetLine =
+    resetIn && resetClock && detailed
+      ? `${resetIn} · ${resetClock}`
+      : resetIn || resetClock;
+  const modelsHTML =
+    detailed && Array.isArray(u.models) && u.models.length
+      ? `<div class="quota-models">${u.models.map((m) => `<span class="quota-model-tag">${escapeHTML(m)}</span>`).join("")}</div>`
+      : "";
+
   return `
-    <div class="usage-row">
+    <div class="usage-row${detailed ? " detailed" : ""}">
       <div class="usage-top">
-        <span class="usage-label">${escapeHTML(u.label || "")}</span>
-        <span class="usage-pct">${pct}%</span>
+        <span class="usage-label-wrap">
+          <span class="usage-label">${escapeHTML(u.label || "")}</span>
+          ${detailed && u.group ? `<span class="mini-tag">${escapeHTML(u.group)}</span>` : ""}
+        </span>
+        <span class="usage-pct">
+          ${detailed ? `已用 <strong>${fmtPct(frac)}</strong> · 剩余 ${fmtPct(remFrac)}` : fmtPct(frac)}
+        </span>
       </div>
-      <div class="bar"><div class="bar-fill ${usageLevel(frac)}" style="width:${pct}%"></div></div>
-      ${reset ? `<div class="usage-reset">${reset}</div>` : ""}
+      <div class="bar">
+        <div class="bar-fill ${usageLevel(frac)}" style="width:${pctWidth}%"></div>
+        ${paceMarker}
+      </div>
+      ${
+        resetLine || u.detail || paceTag
+          ? `<div class="usage-foot">
+              <span class="usage-reset">${escapeHTML(resetLine)}</span>
+              <span class="usage-foot-right">
+                ${u.detail ? `<span class="usage-detail">${escapeHTML(u.detail)}</span>` : ""}
+                ${paceTag}
+              </span>
+            </div>`
+          : ""
+      }
+      ${modelsHTML}
     </div>`;
 }
 
 /* ===== 按需用量查询(点击才查,不自动轮询;镜像桌面端的弹层交互) ===== */
-const usagePanels = {}; // name -> { open, loading, usage, error }
+const usagePanels = {}; // name -> { open, loading, usage, report, queriedAt, error }
 
 const usageChartSVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M13 17V9"/><path d="M18 17V5"/><path d="M8 17v-3"/></svg>`;
 const usageLoaderSVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`;
@@ -885,7 +1002,7 @@ function usagePopHTML(p, st) {
   } else if (st.error) {
     body = `<div class="usage-err">${escapeHTML(st.error)}</div>`;
   } else if (st.usage && st.usage.length) {
-    body = `<div class="usage">${st.usage.map(usageBar).join("")}</div>`;
+    body = `<div class="usage">${st.usage.map((u) => usageBar(u, false)).join("")}</div>`;
   } else {
     body = `<div class="usage-empty">暂无用量数据</div>`;
   }
@@ -911,12 +1028,15 @@ async function queryUsage(name) {
     });
     const d = await r.json();
     st.usage = d.usage || [];
+    st.report = d.report || null;
+    st.queriedAt = d.queried_at || Date.now();
     st.error = d.error || "";
   } catch (e) {
     st.error = String(e);
   }
   st.loading = false;
   renderCards();
+  renderUsageQuotas();
 }
 
 let lastProviders = [];
@@ -975,7 +1095,27 @@ function renderCards() {
       })
       .join("") || `<div class="empty">还没有检测到 Provider</div>`;
 
+  syncCardsToggleAllButton();
+  renderUsageQuotas();
   return claudeResetMs;
+}
+
+function syncCardsToggleAllButton() {
+  const btn = $("#cards-toggle-all");
+  if (!btn) return;
+  const total = lastProviders.length;
+  if (!total) {
+    btn.hidden = true;
+    return;
+  }
+  btn.hidden = false;
+  const allCollapsed = lastProviders.every((p) => collapsedCards.has(p.name));
+  btn.textContent = allCollapsed ? "全部展开" : "全部收起";
+}
+
+function syncAccessTabDot() {
+  const dotEl = $("#tab-dot-access");
+  if (dotEl) dotEl.hidden = !(sshTunnel.running || pub.running);
 }
 
 async function loadStatus() {
@@ -991,19 +1131,25 @@ async function loadStatus() {
     $("#endpoints").innerHTML = providers
       .map((p) => {
         const providerName = `<span class="ep-name">${brandIconHTML(p.name)}<span class="name">${escapeHTML(p.name)}</span></span>`;
+        let text;
         if (p.name === "cursor") {
-          return `<div class="ep">${providerName}<code>agent -e ${escapeHTML(cursorBaseURL())} --auth-token ${escapeHTML(authToken())}</code></div>`;
+          text = `agent -e ${cursorBaseURL()} --auth-token ${authToken()}`;
+        } else if (p.name === "agy") {
+          text = `GET ${proxyBaseURL()}/agy/v1beta/models`;
+        } else if (p.name === "grok") {
+          text = `GROK_CLI_CHAT_PROXY_BASE_URL=${proxyBaseURL()}/grok/v1 (+ auth_provider_command)`;
+        } else {
+          text = `POST ${location.origin}${p.endpoint}`;
         }
-        if (p.name === "grok") {
-          return `<div class="ep">${providerName}<code>GROK_CLI_CHAT_PROXY_BASE_URL=${escapeHTML(proxyBaseURL())}/grok/v1 (+ auth_provider_command)</code></div>`;
-        }
-        return `<div class="ep">${providerName}<code>POST ${escapeHTML(location.origin)}${escapeHTML(p.endpoint)}</code></div>`;
+        return `<div class="ep">${providerName}<code>${escapeHTML(text)}</code><button class="ghost-btn copy-btn" type="button" data-ep-copy="${escapeHTML(text)}" aria-label="复制 ${escapeHTML(p.name)} 端点">复制</button></div>`;
       })
       .join("");
 
-    // 整体健康
+    // 整体健康 + 主标签页状态徽章
+    const provBadge = $("#tab-badge-providers");
     if (!providers.length) {
       setHealth("warn", "未检测到 Provider");
+      if (provBadge) provBadge.hidden = true;
     } else {
       const onCount = providers.filter((p) => p.logged_in).length;
       if (onCount === providers.length) {
@@ -1011,24 +1157,44 @@ async function loadStatus() {
       } else {
         setHealth("warn", `部分未登录 · ${onCount}/${providers.length}`, claudeResetMs);
       }
+      if (provBadge) {
+        provBadge.hidden = false;
+        provBadge.textContent = `${onCount}/${providers.length}`;
+        provBadge.className = "tab-badge " + (onCount === providers.length ? "ok" : "warn");
+      }
     }
 
-    if (claudeResetMs && !countdownTimer) {
-      countdownTimer = setInterval(tickCountdown, 1000);
+    if (claudeResetMs) {
+      countdowns.push({ id: "healthbar", resetMs: claudeResetMs, prefix: " · " });
+      if (!countdownTimer) {
+        countdownTimer = setInterval(tickCountdown, 1000);
+      }
       tickCountdown();
+    } else if (countdownTimer && !countdowns.length) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
     }
   } catch (e) {
     lastProvidersOK = false;
     $("#cards").innerHTML = `<div class="empty">无法连接到 ferridex</div>`;
     setHealth("bad", "无法连接到 ferridex");
+    const provBadge = $("#tab-badge-providers");
+    if (provBadge) {
+      provBadge.hidden = false;
+      provBadge.textContent = "!";
+      provBadge.className = "tab-badge bad";
+    }
   }
 }
 
-/* ===== 实时日志:筛选 / 暂停 / 清空 / 计数 / 重连 ===== */
+/* ===== 实时日志:筛选 / 搜索 / 暂停 / 清空 / 计数 / 重连 ===== */
 let logFilter = "all"; // all | 2 | 4 | 5
+let logQuery = "";
 let logPaused = false;
 let logTotal = 0; // 本次会话累计
 let pendingNew = 0; // 暂停期间新增条数
+let unreadLogs = 0; // 停留在其他标签页时收到的新日志数
+let unreadLogErr = false;
 const MAX_LOG = 300;
 
 function statusClass(n) {
@@ -1040,18 +1206,36 @@ function statusClass(n) {
 }
 
 function logLineHTML(o) {
-  return `<span class="t">${escapeHTML(o.time)}</span>  <span class="m">${escapeHTML(o.method)}</span> ${escapeHTML(o.path)} <span class="s ${statusClass(o.status)}">${escapeHTML(o.status)}</span> <span class="t">${escapeHTML(o.dur)}</span>`;
+  return `<span class="t">${escapeHTML(o.time)}</span><span class="m">${escapeHTML(o.method)}</span><span class="p" title="${escapeHTML(o.path)}">${escapeHTML(o.path)}</span><span class="s ${statusClass(o.status)}">${escapeHTML(o.status)}</span><span class="d">${escapeHTML(o.dur)}</span>`;
+}
+
+function logMatches(line) {
+  const n = +line.dataset.status;
+  if (logFilter !== "all" && Math.floor(n / 100) !== +logFilter) return false;
+  if (logQuery && !(line.dataset.search || "").includes(logQuery)) return false;
+  return true;
 }
 
 function updateLogCount(displayed) {
   $("#log-count").textContent = `${logTotal} / ${displayed}`;
 }
 
+function syncLogTabBadge() {
+  const badge = $("#tab-badge-logs");
+  if (!badge) return;
+  if (unreadLogs <= 0) {
+    badge.hidden = true;
+    return;
+  }
+  badge.hidden = false;
+  badge.textContent = unreadLogs > 99 ? "99+" : String(unreadLogs);
+  badge.className = "tab-badge " + (unreadLogErr ? "bad" : "ok");
+}
+
 function applyFilter() {
   let shown = 0;
   $$("#log .logline").forEach((line) => {
-    const n = +line.dataset.status;
-    const match = logFilter === "all" || Math.floor(n / 100) === +logFilter;
+    const match = logMatches(line);
     line.style.display = match ? "" : "none";
     if (match) shown++;
   });
@@ -1091,12 +1275,19 @@ function startLogs() {
       const line = document.createElement("div");
       line.className = "logline";
       line.dataset.status = o.status;
+      line.dataset.search = `${o.method || ""} ${o.path || ""} ${o.status || ""}`.toLowerCase();
       line.innerHTML = logLineHTML(o);
-      const match = logFilter === "all" || Math.floor(o.status / 100) === +logFilter;
+      const match = logMatches(line);
       line.style.display = match ? "" : "none";
       box.appendChild(line);
 
       while (box.childElementCount > MAX_LOG) box.firstElementChild.remove();
+
+      if (consoleTab !== "logs") {
+        unreadLogs++;
+        if (+o.status >= 400) unreadLogErr = true;
+        syncLogTabBadge();
+      }
 
       if (logPaused) {
         pendingNew++;
@@ -1119,6 +1310,15 @@ function startLogs() {
       applyFilter();
     });
   });
+
+  // 关键词搜索
+  const searchInput = $("#log-search");
+  if (searchInput) {
+    searchInput.addEventListener("input", () => {
+      logQuery = searchInput.value.trim().toLowerCase();
+      applyFilter();
+    });
+  }
 
   // 暂停滚动
   $("#log-pause").addEventListener("click", () => {
@@ -1175,7 +1375,7 @@ async function loadTunnel() {
     panel.classList.toggle("is-running", !!st.running);
     panel.classList.toggle("is-error", !st.running && !!st.last_error);
 
-    badge.className = "badge " + (st.running ? "badge-on" : "badge-off");
+    badge.className = "badge " + (st.running ? "badge-on" : st.last_error ? "badge-err" : "badge-off");
     badge.textContent = st.running ? "运行中" : st.last_error ? "异常" : "未运行";
 
     const remoteEl = $("#tun-remote");
@@ -1234,7 +1434,7 @@ async function loadPublic() {
     panel.classList.toggle("is-running", pub.running);
     panel.classList.toggle("is-error", !pub.running && !!st.last_error);
 
-    badge.className = "badge " + (pub.running ? "badge-on" : "badge-off");
+    badge.className = "badge " + (pub.running ? "badge-on" : st.last_error ? "badge-err" : "badge-off");
     badge.textContent = pub.running ? "运行中" : st.last_error ? "异常" : "未运行";
 
     $("#pub-start").disabled = pub.running;
@@ -1275,6 +1475,7 @@ function syncRemoteTargetAvailability() {
   }
   syncTargetToggle();
   loadClientConfigs();
+  syncAccessTabDot();
 }
 
 async function publicAction(path) {
@@ -1326,29 +1527,35 @@ async function toggleHubPublic() {
   }
 }
 
+let hubCopyTimer = null;
+
 async function copyHubLaunch() {
   // 路由自动跟随公网状态,与「客户端」页的目标选择器无关。
   const usePublic = pub.running && !!pub.url;
   const btn = $("#hub-copy-launch");
-  const original = btn.textContent;
+  if (hubCopyTimer) clearTimeout(hubCopyTimer);
   try {
     const cmd = withRoutedLaunch(usePublic ? "public" : "local", () =>
       $(HUB_COPY_TARGETS[hubTab] || HUB_COPY_TARGETS.claude).textContent
     );
     await copyText(cmd);
     btn.textContent = "已复制";
+    btn.classList.add("copied");
     toast(usePublic ? "已复制公网启动命令" : "已复制本机启动命令");
   } catch {
     btn.textContent = "复制失败";
+    btn.classList.remove("copied");
     toast("复制失败", "err");
   }
-  setTimeout(() => {
-    btn.textContent = original;
+  hubCopyTimer = setTimeout(() => {
+    btn.textContent = HUB_COPY_LABELS[hubTab];
+    btn.classList.remove("copied");
+    hubCopyTimer = null;
   }, 1600);
 }
 
-/* ===== 主标签页:上游 / Provider 状态 / 远程访问 / 客户端 / 日志 ===== */
-const CONSOLE_TABS = ["upstream", "providers", "access", "clients", "logs"];
+/* ===== 主标签页:上游 / 用量监控 / 响应速度 / Provider 状态 / 远程访问 / 客户端 / 日志 ===== */
+const CONSOLE_TABS = ["upstream", "usage", "speed", "providers", "access", "clients", "logs"];
 
 let consoleTab = "upstream";
 try {
@@ -1367,6 +1574,11 @@ function setConsoleTab(tab) {
   $$(".console-pane").forEach((pane) => {
     pane.hidden = pane.dataset.consolePane !== consoleTab;
   });
+  if (consoleTab === "logs") {
+    unreadLogs = 0;
+    unreadLogErr = false;
+    syncLogTabBadge();
+  }
   try { localStorage.setItem("ferridex.consoleTab", consoleTab); } catch {}
 }
 
@@ -1458,6 +1670,7 @@ $("#target-toggle").addEventListener("click", (e) => {
   clientTarget = requested === "ssh" || requested === "public" ? requested : "local";
   syncTargetToggle();
   loadClientConfigs();
+  syncAccessTabDot();
 });
 
 // provider 卡片交互:委托绑在常驻的 #cards 上,5 秒重渲染后依旧生效。
@@ -1492,9 +1705,561 @@ $("#cards").addEventListener("click", (e) => {
   toggle.setAttribute("aria-expanded", String(!collapsed));
   if (collapsed) collapsedCards.add(name);
   else collapsedCards.delete(name);
+  syncCardsToggleAllButton();
 });
 
-$("#log").innerHTML = `<div class="empty">暂无请求日志，向 /v1/responses 或 /v1/messages 发一次请求即可看到</div>`;
+// 顶栏健康药丸点击跳转至 Provider 状态页
+const healthBar = $("#healthbar");
+if (healthBar) {
+  healthBar.addEventListener("click", () => setConsoleTab("providers"));
+  healthBar.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      setConsoleTab("providers");
+    }
+  });
+}
+
+// Provider 卡片一键全部展开/收起
+const cardsToggleAll = $("#cards-toggle-all");
+if (cardsToggleAll) {
+  cardsToggleAll.addEventListener("click", () => {
+    const allCollapsed = lastProviders.every((p) => collapsedCards.has(p.name));
+    if (allCollapsed) collapsedCards.clear();
+    else lastProviders.forEach((p) => collapsedCards.add(p.name));
+    renderCards();
+  });
+}
+
+// 点击外部或按 Escape 关闭打开的用量弹层
+function closeAllUsagePopovers() {
+  let changed = false;
+  Object.keys(usagePanels).forEach((name) => {
+    if (usagePanels[name] && usagePanels[name].open) {
+      usagePanels[name].open = false;
+      changed = true;
+    }
+  });
+  if (changed) renderCards();
+}
+document.addEventListener("click", (e) => {
+  if (e.target.closest(".usage-pop") || e.target.closest("[data-usage]")) return;
+  closeAllUsagePopovers();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeAllUsagePopovers();
+});
+
+// 接入端点一键复制(事件委托,兼容 5s 重渲染)
+const endpointsBox = $("#endpoints");
+if (endpointsBox) {
+  endpointsBox.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-ep-copy]");
+    if (!btn) return;
+    const text = btn.dataset.epCopy;
+    if (!text) return;
+    const original = btn.textContent;
+    try {
+      await copyText(text);
+      btn.textContent = "已复制";
+      btn.classList.add("copied");
+      toast("已复制接入端点");
+    } catch {
+      btn.textContent = "复制失败";
+      toast("复制失败", "err");
+    }
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove("copied");
+    }, 1400);
+  });
+}
+
+// 客户端页按客户端筛选
+const clientFilterBar = $("#client-filter");
+if (clientFilterBar) {
+  clientFilterBar.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-client-filter]");
+    if (!btn) return;
+    const target = btn.dataset.clientFilter;
+    $$("#client-filter .filter-pill").forEach((pill) => {
+      pill.classList.toggle("active", pill === btn);
+    });
+    $$(".client-group").forEach((group) => {
+      group.hidden = target !== "all" && group.dataset.clientGroup !== target;
+    });
+  });
+}
+
+/* ===== 用量监控 & 响应速度 (/api/metrics) ===== */
+let metricsWindow = "24h";
+let usageGroupBy = "model"; // model | provider
+let speedProviderFilter = "all";
+let metricsData = {
+  window: "24h",
+  summary: {},
+  by_provider: [],
+  by_model: [],
+  hourly: [],
+  recent: [],
+};
+
+function fmtTokens(n) {
+  const v = Number(n || 0);
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
+  return String(Math.round(v));
+}
+
+function fmtMs(ms) {
+  const v = Number(ms || 0);
+  if (v <= 0) return "—";
+  if (v >= 10000) return (v / 1000).toFixed(1) + "s";
+  if (v >= 1000) return (v / 1000).toFixed(2) + "s";
+  return Math.round(v) + "ms";
+}
+
+function ttftClass(ms) {
+  if (!ms || ms <= 0) return "na";
+  if (ms < 800) return "fast";
+  if (ms < 2500) return "mid";
+  return "slow";
+}
+
+function tpsBarClass(tps) {
+  if (tps >= 50) return "";
+  if (tps >= 20) return "mid";
+  return "slow";
+}
+
+function syncMetricsWindowButtons() {
+  $$("[data-metrics-window]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.metricsWindow === metricsWindow);
+  });
+}
+
+function renderUsageQuotas() {
+  const wrap = $("#usage-quotas");
+  const allBtn = $("#quota-query-all");
+  if (!wrap) return;
+  // 仅展示已登录本机订阅的 Provider；未登录的不在此处显示。
+  const list = lastProviders.filter((p) => p.supports_usage && p.logged_in);
+  const anyLoading = list.some((p) => (usagePanels[p.name] || {}).loading);
+  if (allBtn) {
+    allBtn.hidden = !list.length;
+    allBtn.disabled = !list.length || anyLoading;
+    allBtn.textContent = anyLoading ? "查询中…" : "查询全部配额";
+  }
+  if (!list.length) {
+    wrap.innerHTML = `<div class="empty">当前没有已登录且支持配额查询的本机订阅</div>`;
+    return;
+  }
+  wrap.innerHTML = list
+    .map((p) => {
+      const safeName = escapeHTML(p.name);
+      const safeTitle = escapeHTML(p.title || p.name);
+      const st = usagePanels[p.name] || {};
+      const rep = st.report || null;
+      const acct = (rep && rep.account) || p.account || "";
+      const planBadge =
+        rep && rep.plan
+          ? `<span class="quota-chip plan">${escapeHTML(rep.plan)}</span>`
+          : "";
+      const statusTone =
+        rep && rep.status
+          ? rep.status.includes("已达")
+            ? "bad"
+            : rep.status.includes("部分")
+              ? "warn"
+              : "ok"
+          : "";
+      const statusBadge =
+        rep && rep.status
+          ? `<span class="quota-chip ${statusTone}">${escapeHTML(rep.status)}</span>`
+          : "";
+      const updatedText = st.queriedAt && !st.loading ? `${fmtTimeClock(st.queriedAt)} 更新` : "";
+
+      let body;
+      if (st.loading) {
+        body = `<div class="usage-empty">正在查询上游配额详情…</div>`;
+      } else if (st.error) {
+        body = `<div class="usage-err">${escapeHTML(st.error)}</div>`;
+      } else if (st.usage && st.usage.length) {
+        const extrasHTML =
+          rep && Array.isArray(rep.extras) && rep.extras.length
+            ? `<div class="quota-extras">${rep.extras
+                .map(
+                  (ex) =>
+                    `<span class="quota-extra ${escapeHTML(ex.tone || "")}"><em>${escapeHTML(ex.label)}</em><strong>${escapeHTML(ex.value)}</strong></span>`
+                )
+                .join("")}</div>`
+            : "";
+        body = `<div class="usage">${st.usage.map((u) => usageBar(u, true)).join("")}</div>${extrasHTML}`;
+      } else {
+        body = `<div class="usage-empty">点击「查询配额」获取订阅套餐、剩余比例、重置时刻与模型共享池详情</div>`;
+      }
+
+      const metaLine = [acct, updatedText].filter(Boolean).join(" · ");
+      return `
+        <div class="quota-card">
+          <div class="quota-head">
+            <div class="quota-title-wrap">
+              <div class="quota-title-row">
+                <span class="quota-title">${brandIconHTML(p.name)}${safeTitle}</span>
+                ${planBadge}
+                ${statusBadge}
+              </div>
+              ${metaLine ? `<span class="quota-acct" title="${escapeHTML(metaLine)}">${escapeHTML(metaLine)}</span>` : ""}
+            </div>
+            <button class="ghost-btn" type="button" data-quota-query="${safeName}" ${st.loading ? "disabled" : ""}>${st.loading ? "查询中…" : st.usage && st.usage.length ? "刷新" : "查询配额"}</button>
+          </div>
+          ${body}
+        </div>`;
+    })
+    .join("");
+}
+
+function renderUsageMonitor() {
+  const s = metricsData.summary || {};
+  const kpiWrap = $("#usage-kpis");
+  if (kpiWrap) {
+    kpiWrap.innerHTML = [
+      {
+        label: "总 Token 消耗",
+        value: fmtTokens(s.total_tokens),
+        cls: "accent",
+        sub: `输入 ${fmtTokens(s.input_tokens)} · 输出 ${fmtTokens(s.output_tokens)}`,
+      },
+      {
+        label: "缓存命中率",
+        value: s.requests ? `${Number(s.cache_hit_rate || 0).toFixed(1)}%` : "—",
+        cls: "ok",
+        sub: `读取 ${fmtTokens(s.cache_read_tokens)} · 写入 ${fmtTokens(s.cache_write_tokens)}`,
+      },
+      {
+        label: "对话请求数",
+        value: String(s.requests || 0),
+        cls: "",
+        sub: s.requests ? `成功率 ${Number(s.success_rate || 0).toFixed(1)}% (${s.success_requests}/${s.requests})` : "暂无记录",
+      },
+      {
+        label: "活跃模型 / Provider",
+        value: `${s.active_models || 0} / ${s.active_providers || 0}`,
+        cls: "",
+        sub: `统计窗口：${metricsWindow === "today" ? "今日" : metricsWindow === "24h" ? "近 24 小时" : metricsWindow === "7d" ? "近 7 天" : "全部"}`,
+      },
+    ]
+      .map(
+        (k) => `
+        <div class="kpi-card">
+          <span class="kpi-label">${k.label}</span>
+          <strong class="kpi-value ${k.cls}">${escapeHTML(k.value)}</strong>
+          <span class="kpi-sub" title="${escapeHTML(k.sub)}">${escapeHTML(k.sub)}</span>
+        </div>`
+      )
+      .join("");
+  }
+
+  // 24h 柱状图
+  const hourlyWrap = $("#usage-hourly");
+  if (hourlyWrap) {
+    const buckets = Array.isArray(metricsData.hourly) ? metricsData.hourly : [];
+    const maxTok = Math.max(1, ...buckets.map((b) => b.total_tokens || 0));
+    hourlyWrap.innerHTML = buckets
+      .map((b, idx) => {
+        const total = b.total_tokens || 0;
+        const inPct = total ? Math.round(((b.input_tokens || 0) / maxTok) * 100) : 0;
+        const outPct = total ? Math.max(total > 0 ? 3 : 0, Math.round(((b.output_tokens || 0) / maxTok) * 100)) : 0;
+        const showLbl = idx % 4 === 0 || idx === buckets.length - 1;
+        const tip = `${b.hour} · ${b.requests || 0} 次请求 · 总计 ${fmtTokens(total)}（输入/缓存 ${fmtTokens(b.input_tokens)}，输出 ${fmtTokens(b.output_tokens)}）`;
+        return `
+          <div class="hourly-col" title="${escapeHTML(tip)}">
+            <div class="hourly-bar-wrap">
+              <div class="hourly-bar-out" style="height:${Math.min(100, outPct)}%"></div>
+              <div class="hourly-bar-in" style="height:${Math.min(100 - Math.min(100, outPct), inPct)}%"></div>
+            </div>
+            <span class="hourly-lbl">${showLbl ? escapeHTML(b.hour.slice(0, 2)) : ""}</span>
+          </div>`;
+      })
+      .join("");
+  }
+
+  // 明细表
+  const bdWrap = $("#usage-breakdown");
+  if (bdWrap) {
+    const rows = usageGroupBy === "provider" ? metricsData.by_provider || [] : metricsData.by_model || [];
+    const grandTotal = Math.max(1, Number(s.total_tokens || 0));
+    if (!rows.length) {
+      bdWrap.innerHTML = `<div class="empty">当前时间窗口内暂无对话 Token 记录，通过代理发起一次对话后即可在此查看统计</div>`;
+    } else {
+      const headLabel = usageGroupBy === "provider" ? "Provider" : "模型";
+      bdWrap.innerHTML = `
+        <table class="metrics-table">
+          <thead>
+            <tr>
+              <th>${headLabel}</th>
+              <th class="num">请求数</th>
+              <th class="num">输入 Token</th>
+              <th class="num">输出 Token</th>
+              <th class="num">缓存读取</th>
+              <th class="num">总计 / 占比</th>
+              <th class="num">成功率</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map((r) => {
+                const share = Math.round(((r.total_tokens || 0) * 100) / grandTotal);
+                const firstCell =
+                  usageGroupBy === "provider"
+                    ? `<span class="cell-provider">${brandIconHTML(r.provider)}<strong>${escapeHTML(r.provider)}</strong></span>`
+                    : `<span class="cell-provider">${brandIconHTML(r.provider)}<span class="cell-model-name" title="${escapeHTML(r.model)}">${escapeHTML(r.model)}</span></span>`;
+                return `
+                  <tr>
+                    <td>${firstCell}</td>
+                    <td class="num">${r.requests || 0}</td>
+                    <td class="num">${fmtTokens(r.input_tokens)}</td>
+                    <td class="num">${fmtTokens(r.output_tokens)}</td>
+                    <td class="num">${fmtTokens(r.cache_read_tokens)}</td>
+                    <td class="num">${fmtTokens(r.total_tokens)}<span class="share-bar" title="${share}%"><span class="share-fill" style="width:${share}%"></span></span></td>
+                    <td class="num">${Number(r.success_rate || 0).toFixed(1)}%</td>
+                  </tr>`;
+              })
+              .join("")}
+          </tbody>
+        </table>`;
+    }
+  }
+}
+
+function renderSpeedMonitor() {
+  const s = metricsData.summary || {};
+  const badge = $("#tab-badge-speed");
+  if (badge) {
+    if (s.speed_samples > 0 && s.avg_tps > 0) {
+      badge.hidden = false;
+      badge.textContent = `${Number(s.avg_tps).toFixed(0)}t/s`;
+      badge.className = "tab-badge " + (s.avg_tps >= 40 ? "ok" : "warn");
+    } else {
+      badge.hidden = true;
+    }
+  }
+
+  const kpiWrap = $("#speed-kpis");
+  if (kpiWrap) {
+    kpiWrap.innerHTML = [
+      {
+        label: "平均生成速度",
+        value: s.avg_tps > 0 ? `${Number(s.avg_tps).toFixed(1)} tok/s` : "—",
+        cls: "ok",
+        sub: s.speed_samples > 0 ? `峰值 ${Number(s.max_tps).toFixed(1)} · 最低 ${Number(s.min_tps).toFixed(1)} tok/s` : "等待对话样本",
+      },
+      {
+        label: "中位首字延迟 (P50)",
+        value: fmtMs(s.median_ttft_ms),
+        cls: "accent",
+        sub: s.p95_ttft_ms > 0 ? `P95 首字延迟 ${fmtMs(s.p95_ttft_ms)}` : "TTFT 越小响应越快",
+      },
+      {
+        label: "平均首字延迟 (Avg)",
+        value: fmtMs(s.avg_ttft_ms),
+        cls: s.avg_ttft_ms >= 2500 ? "warn" : "",
+        sub: "从发出请求到首个内容 Token",
+      },
+      {
+        label: "有效测速对话",
+        value: String(s.speed_samples || 0),
+        cls: "",
+        sub: `共记录 ${s.requests || 0} 次对话请求`,
+      },
+    ]
+      .map(
+        (k) => `
+        <div class="kpi-card">
+          <span class="kpi-label">${k.label}</span>
+          <strong class="kpi-value ${k.cls}">${escapeHTML(k.value)}</strong>
+          <span class="kpi-sub" title="${escapeHTML(k.sub)}">${escapeHTML(k.sub)}</span>
+        </div>`
+      )
+      .join("");
+  }
+
+  // 模型平均速度对比条
+  const barsWrap = $("#speed-model-bars");
+  if (barsWrap) {
+    const models = (metricsData.by_model || [])
+      .filter((m) => m.avg_tps > 0 || m.median_ttft_ms > 0)
+      .slice()
+      .sort((a, b) => (b.avg_tps || 0) - (a.avg_tps || 0));
+    if (!models.length) {
+      barsWrap.innerHTML = `<div class="empty">暂无模型测速数据</div>`;
+    } else {
+      const maxTps = Math.max(1, ...models.map((m) => m.avg_tps || 0));
+      barsWrap.innerHTML = models
+        .map((m) => {
+          const pct = m.avg_tps > 0 ? Math.max(6, Math.round((m.avg_tps / maxTps) * 100)) : 0;
+          return `
+            <div class="speed-bar-row">
+              <div class="speed-bar-name" title="${escapeHTML(m.model)}">${brandIconHTML(m.provider)}<span>${escapeHTML(m.model)}</span></div>
+              <div class="speed-bar-track"><div class="speed-bar-fill" style="width:${pct}%"></div></div>
+              <div class="speed-bar-meta"><strong>${m.avg_tps > 0 ? Number(m.avg_tps).toFixed(1) + " tok/s" : "—"}</strong> · TTFT ${fmtMs(m.median_ttft_ms)} (${m.requests}次)</div>
+            </div>`;
+        })
+        .join("");
+    }
+  }
+
+  // 每次对话明细表
+  const recWrap = $("#speed-records");
+  if (recWrap) {
+    const allRecent = Array.isArray(metricsData.recent) ? metricsData.recent : [];
+    const list =
+      speedProviderFilter === "all"
+        ? allRecent
+        : allRecent.filter((r) => r.provider === speedProviderFilter);
+    if (!list.length) {
+      recWrap.innerHTML = `<div class="empty">暂无符合条件的对话速度记录，向任意已接入客户端发送一条消息后即可实时看到 TTFT 与 tok/s</div>`;
+    } else {
+      const maxRowTps = Math.max(10, ...list.map((r) => r.tokens_per_sec || 0));
+      recWrap.innerHTML = `
+        <table class="metrics-table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>Provider / 上游</th>
+              <th>模型</th>
+              <th class="num">首字延迟 (TTFT)</th>
+              <th class="num">生成速度</th>
+              <th class="num">输出 / 输入</th>
+              <th class="num">总耗时</th>
+              <th class="num">状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${list
+              .map((r) => {
+                const tps = Number(r.tokens_per_sec || 0);
+                const tpsPct = tps > 0 ? Math.max(8, Math.min(100, Math.round((tps / maxRowTps) * 100))) : 0;
+                const totalMs = Math.max(1, Number(r.total_ms || 0));
+                const ttftPct = Math.min(100, Math.round((Number(r.ttft_ms || 0) * 100) / totalMs));
+                const decPct = Math.max(0, 100 - ttftPct);
+                const stCls = statusClass(r.status);
+                const stBadge = `<span class="speed-pill ${stCls === "s2" ? "fast" : stCls === "s4" ? "mid" : "slow"}">${escapeHTML(r.status)}</span>`;
+                return `
+                  <tr>
+                    <td class="mono">${escapeHTML(r.time || "")}</td>
+                    <td>
+                      <span class="cell-provider">
+                        ${brandIconHTML(r.provider)}
+                        <span>${escapeHTML(r.provider || "")}</span>
+                        ${r.upstream ? `<span class="mini-tag">${escapeHTML(r.upstream)}</span>` : ""}
+                      </span>
+                    </td>
+                    <td>
+                      <span class="cell-model">
+                        <span class="cell-model-name" title="${escapeHTML(r.model || r.path)}">${escapeHTML(r.model || r.path)}</span>
+                        <span class="mini-tag${r.stream ? " sse" : ""}">${r.stream ? "SSE" : "JSON"}</span>
+                      </span>
+                    </td>
+                    <td class="num"><span class="speed-pill ${ttftClass(r.ttft_ms)}">${fmtMs(r.ttft_ms)}</span></td>
+                    <td class="num">
+                      ${
+                        tps > 0
+                          ? `<span class="tps-cell"><strong>${tps.toFixed(1)}</strong><span class="mini-tag">tok/s</span><span class="tps-track"><span class="tps-fill ${tpsBarClass(tps)}" style="width:${tpsPct}%"></span></span></span>`
+                          : `<span class="speed-pill na">—</span>`
+                      }
+                    </td>
+                    <td class="num">${fmtTokens(r.output_tokens)} / ${fmtTokens(r.input_tokens)}</td>
+                    <td class="num">
+                      <div>${fmtMs(r.total_ms)}</div>
+                      <div class="dur-bar" title="TTFT ${fmtMs(r.ttft_ms)} / 解码 ${fmtMs(r.decode_ms)}"><span class="dur-ttft" style="width:${ttftPct}%"></span><span class="dur-decode" style="width:${decPct}%"></span></div>
+                    </td>
+                    <td class="num">${stBadge}</td>
+                  </tr>`;
+              })
+              .join("")}
+          </tbody>
+        </table>`;
+    }
+  }
+}
+
+async function loadMetrics() {
+  try {
+    const r = await fetch(`/api/metrics?window=${encodeURIComponent(metricsWindow)}`);
+    if (!r.ok) return;
+    metricsData = await r.json();
+    renderUsageMonitor();
+    renderSpeedMonitor();
+  } catch {}
+}
+
+// 用量监控 / 响应速度交互绑定
+$$("[data-metrics-window]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    metricsWindow = btn.dataset.metricsWindow || "24h";
+    syncMetricsWindowButtons();
+    loadMetrics();
+  });
+});
+
+const usageGroupToggle = $("#usage-group-toggle");
+if (usageGroupToggle) {
+  usageGroupToggle.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-usage-group]");
+    if (!btn) return;
+    usageGroupBy = btn.dataset.usageGroup === "provider" ? "provider" : "model";
+    $$("#usage-group-toggle .seg-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    renderUsageMonitor();
+  });
+}
+
+const speedFilterBar = $("#speed-provider-filter");
+if (speedFilterBar) {
+  speedFilterBar.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-speed-provider]");
+    if (!btn) return;
+    speedProviderFilter = btn.dataset.speedProvider || "all";
+    $$("#speed-provider-filter .filter-pill").forEach((p) => p.classList.toggle("active", p === btn));
+    renderSpeedMonitor();
+  });
+}
+
+const metricsClearBtn = $("#metrics-clear");
+if (metricsClearBtn) {
+  metricsClearBtn.addEventListener("click", async () => {
+    if (!window.confirm("确定要清空本地保存的用量与测速历史记录吗？")) return;
+    try {
+      const r = await fetch("/api/metrics/clear", { method: "POST" });
+      const d = await r.json();
+      if (d.ok === false) throw new Error(d.error || "清空失败");
+      toast("已清空用量与测速统计");
+      loadMetrics();
+    } catch (e) {
+      toast("清空失败：" + (e.message || e), "err");
+    }
+  });
+}
+
+const usageQuotasBox = $("#usage-quotas");
+if (usageQuotasBox) {
+  usageQuotasBox.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-quota-query]");
+    if (!btn) return;
+    queryUsage(btn.dataset.quotaQuery);
+  });
+}
+
+const quotaQueryAllBtn = $("#quota-query-all");
+if (quotaQueryAllBtn) {
+  quotaQueryAllBtn.addEventListener("click", () => {
+    const queryable = lastProviders.filter((p) => p.supports_usage && p.logged_in);
+    queryable.forEach((p) => queryUsage(p.name));
+  });
+}
+
+$("#log").innerHTML = `<div class="empty">暂无请求日志，向 /v1/responses、/v1/messages、/agy 或 /grok 发一次请求即可看到</div>`;
 updateLogCount(0);
 
 loadNetinfo();
@@ -1505,11 +2270,13 @@ startAccordions();
 loadStatus();
 loadTunnel();
 loadPublic();
+loadMetrics();
 setInterval(() => {
   loadStatus();
   loadTunnel();
   loadPublic();
   loadResponsesUpstream(false);
   loadClaudeUpstream();
+  loadMetrics();
 }, 5000);
 startLogs();

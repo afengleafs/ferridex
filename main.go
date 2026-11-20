@@ -37,20 +37,23 @@ func main() {
 	claude := provider.NewClaudeProvider()
 	cursor := provider.NewCursorProvider()
 	grok := provider.NewGrokProvider()
+	agy := provider.NewAgyProvider()
 
 	switch cmd {
 	case "serve":
-		server.RunServe(*addr, !*noOpen, *lan, *newKey, *autoPort, codex, claude, cursor, grok)
+		server.RunServe(*addr, !*noOpen, *lan, *newKey, *autoPort, codex, claude, cursor, grok, agy)
 	case "codex":
 		server.RunSingle(*addr, *autoPort, codex)
 	case "claude":
 		server.RunSingle(*addr, *autoPort, claude)
 	case "cursor":
 		server.RunSingle(*addr, *autoPort, cursor)
+	case "agy":
+		server.RunSingle(*addr, *autoPort, agy)
 	case "grok":
 		server.RunSingle(*addr, *autoPort, grok)
 	case "status":
-		server.PrintStatus(codex, claude, cursor, grok)
+		server.PrintStatus(codex, claude, cursor, grok, agy)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -61,13 +64,14 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`ferridex — Codex + Claude + Cursor + Grok 订阅本地代理
+	fmt.Print(`ferridex — Codex + Claude + Cursor + Grok + agy 订阅本地代理
 
 用法:
-  ferridex serve     启动统一网关(Codex + Claude + Cursor + Grok)+ 面板,自动开浏览器(默认命令)
+  ferridex serve     启动统一网关(Codex + Claude + Cursor + Grok + agy)+ 面板,自动开浏览器(默认命令)
   ferridex codex     只起 Codex 代理(暴露 /v1/responses)
   ferridex claude    只起 Claude 代理(暴露 /v1/messages)
   ferridex cursor    只起 Cursor 代理(Connect-RPC 透明反代)
+  ferridex agy       只起 Antigravity 代理(/agy/v1beta)
   ferridex grok      只起 Grok 代理(/grok/v1 透明反代)
   ferridex status    打印各 provider 登录 / 健康状态
 

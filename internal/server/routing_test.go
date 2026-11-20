@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -129,5 +130,74 @@ func TestLANGateKeepsResponsesManagementLocalOnly(t *testing.T) {
 	handler.ServeHTTP(relayRecorder, relay)
 	if relayRecorder.Code != http.StatusOK {
 		t.Fatalf("LAN relay status = %d, want 200", relayRecorder.Code)
+	}
+}
+
+func TestAgyGeminiKey(t *testing.T) {
+	for _, path := range []string{"/agy/v1beta/models", "/agy/v1beta/models/test:generateContent", "/v1/messages", "/api/status"} {
+		r := httptest.NewRequest("GET", path, nil)
+		if checkKey(r, "test") {
+			t.Fatal("accepted missing key")
+		}
+		r.Header.Set("x-goog-api-key", "wrong")
+		if checkKey(r, "test") {
+			t.Fatal("accepted wrong key")
+		}
+		r.Header.Set("x-goog-api-key", "test")
+		if got := checkKey(r, "test"); got != (strings.HasPrefix(path, "/agy/")) {
+			t.Fatalf("unexpected key handling for %s", path)
+		}
+	}
+}
+
+type testAgyProvider struct{ fakeClaudeSubscriptionProvider }
+
+func (testAgyProvider) Name() string { return "agy" }
+
+func TestAgyRemoteRoutes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, lan := range []bool{true, false} {
+		handler := lanGate(lan, buildMux(false, lan, "downstream", !lan, nil, nil, nil, nil, testAgyProvider{}))
+		for _, key := range []string{"", "wrong", "downstream"} {
+			req := httptest.NewRequest("GET", "/agy/v1beta/models", nil)
+			if lan {
+				req.RemoteAddr = "192.168.1.23:5555"
+			} else {
+				req.RemoteAddr = "127.0.0.1:5555"
+			}
+			req.Header.Set("x-goog-api-key", key)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			want := 401
+			if key == "downstream" {
+				want = 204
+			}
+			if w.Code != want {
+				t.Fatalf("lan %t key %q: got %d", lan, key, w.Code)
+			}
+		}
+		req := httptest.NewRequest("GET", "/api/status", nil)
+		req.RemoteAddr = "192.168.1.23:5555"
+		req.Header.Set("x-goog-api-key", "downstream")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code < 400 {
+			t.Fatal("dashboard exposed")
+		}
+	}
+}
+
+func TestAgyDashboardRoutes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	mux := buildMux(true, false, "", false, nil, nil, nil, nil, testAgyProvider{})
+	for _, path := range []string{"/", "/agy/v1beta/models"} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if path == "/" && (w.Code != 200 || !strings.Contains(w.Body.String(), "hub-tab-agy")) {
+			t.Fatal("missing agy dashboard")
+		}
+		if path != "/" && w.Code != 204 {
+			t.Fatalf("model route status %d", w.Code)
+		}
 	}
 }

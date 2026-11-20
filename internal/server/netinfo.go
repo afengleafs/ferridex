@@ -150,7 +150,7 @@ func lanGate(enabled bool, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if provider.IsCursorLANPath(path) || provider.IsGrokLANPath(path) {
+		if provider.IsAgyPath(path) || provider.IsCursorLANPath(path) || provider.IsGrokLANPath(path) {
 			next.ServeHTTP(w, r)
 			return
 		}
